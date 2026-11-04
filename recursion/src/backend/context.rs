@@ -2,7 +2,6 @@ use alloc::string::ToString;
 use alloc::vec::Vec;
 
 use p3_air::{SymbolicExpression, SymbolicExpressionExt};
-use p3_circuit_prover::air::AluExtMulKind;
 use p3_circuit_prover::batch_stark_prover::NUM_PRIMITIVE_TABLES;
 use p3_circuit_prover::{AirVariant, BatchStarkProof, CircuitVerifier, RowCounts, TablePacking};
 use p3_commit::{Pcs, UnivariateStarkPcs};
@@ -483,11 +482,7 @@ where
     let public_values = verifier
         .table_public_values(expected_statement)
         .map_err(|error| VerificationError::InvalidProofShape(error.to_string()))?;
-    let (w_binomial, alu_quintic_trinomial) = match relation.reduction() {
-        AluExtMulKind::Base => (None, false),
-        AluExtMulKind::Binomial { w } => (Some(w), false),
-        AluExtMulKind::QuinticTrinomial => (None, true),
-    };
+    let (w_binomial, alu_quintic_trinomial) = relation.reduction().w_and_trinomial();
     Ok(StarkPackingAuthority::Batch {
         public_inputs: public_values.iter().map(Vec::len).collect(),
         table_packing: relation.table_packing().clone(),

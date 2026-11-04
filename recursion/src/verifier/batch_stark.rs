@@ -362,14 +362,15 @@ where
 /// Create an AluAir with the appropriate constructor based on TRACE_D.
 ///
 /// For D=1 (base field), uses `new_with_preprocessed` with zeroed lane prep.
-/// For D=5 with `alu_quintic_trinomial`, uses `new_quintic_trinomial_with_preprocessed`.
-/// Otherwise for D>1, uses `new_binomial_with_preprocessed` with `W` from `EF`.
+/// With `alu_quintic_trinomial` (the trinomial flag), uses the trinomial reduction for TRACE_D:
+/// cubic for D=3, quintic for D=5. Otherwise for D>1, uses a binomial reduction with `W` from `EF`.
 /// `horner_packed_steps` must match `BatchStarkProof.table_packing.horner_packed_steps` from the proof.
 ///
 /// # Errors
 /// Returns an error if `TRACE_D` and `alu_quintic_trinomial` (both proof-controlled) don't
 /// resolve to a supported ALU extension-multiplication kind for `EF` — e.g. a quintic extension
-/// declared without the trinomial flag, which has no binomial `W`.
+/// declared without the trinomial flag, which has no binomial `W`, or a trinomial flag that
+/// disagrees with `EF`.
 fn create_alu_air<F, EF, const TRACE_D: usize>(
     num_ops: usize,
     lanes: usize,
@@ -386,17 +387,21 @@ where
     if horner_packed_steps == 0 {
         return Err("packed Horner step count must be positive".to_string());
     }
-    let reduction = AluExtMulKind::resolve(
-        TRACE_D,
-        EF::extract_w(),
-        TRACE_D == 5 && alu_quintic_trinomial,
-    )
-    .ok_or_else(|| {
-        format!(
-            "unsupported ALU extension-multiplication kind for trace degree {TRACE_D} \
+    // The flag is proof-controlled; bind it to the verifier's `EF` so a proof cannot swap a
+    // binomial relation for a trinomial one (or the reverse).
+    if alu_quintic_trinomial != EF::alu_is_trinomial() {
+        return Err(format!(
+            "ALU trinomial flag {alu_quintic_trinomial} does not match the expected trace field \
+             for trace degree {TRACE_D}"
+        ));
+    }
+    let reduction = AluExtMulKind::resolve(TRACE_D, EF::extract_w(), alu_quintic_trinomial)
+        .ok_or_else(|| {
+            format!(
+                "unsupported ALU extension-multiplication kind for trace degree {TRACE_D} \
              (alu_quintic_trinomial={alu_quintic_trinomial})"
-        )
-    })?;
+            )
+        })?;
     Ok(
         AluAir::<F, TRACE_D>::from_reduction(num_ops, lanes, reduction)
             .with_horner_pack_k(horner_packed_steps),
@@ -2007,7 +2012,9 @@ mod create_alu_air_tests {
     use p3_circuit_prover::common::CircuitTableAir;
     use p3_circuit_prover::field_params::ExtractBinomialW;
     use p3_commit::{Pcs as PcsTrait, UnivariateStarkPcs};
-    use p3_field::extension::{BinomialExtensionField, QuinticTrinomialExtensionField};
+    use p3_field::extension::{
+        BinomialExtensionField, CubicTrinomialExtensionField, QuinticTrinomialExtensionField,
+    };
     use p3_field::{BasedVectorSpace, Field, PrimeCharacteristicRing};
     use p3_fri::FriProof;
     use p3_goldilocks::Goldilocks;
@@ -2086,6 +2093,38 @@ mod create_alu_air_tests {
         let result = create_alu_air::<KoalaBear, QuinticTrinomialExtensionField<KoalaBear>, 5>(
             4, 1, 4, true,
         );
+        assert!(result.is_ok());
+    }
+
+    /// The Goldilocks cubic trinomial resolves with the trinomial flag set.
+    #[test]
+    fn cubic_with_trinomial_flag_succeeds() {
+        let result = create_alu_air::<Goldilocks, CubicTrinomialExtensionField<Goldilocks>, 3>(
+            4, 1, 4, true,
+        );
+        assert!(result.is_ok());
+    }
+
+    /// A Goldilocks cubic declared without the trinomial flag has no binomial `W`.
+    #[test]
+    fn cubic_without_trinomial_flag_is_rejected() {
+        let result = create_alu_air::<Goldilocks, CubicTrinomialExtensionField<Goldilocks>, 3>(
+            4, 1, 4, false,
+        );
+        assert!(result.is_err());
+    }
+
+    /// A proof-controlled trinomial flag cannot replace the binomial relation of a binomial `EF`.
+    #[test]
+    fn trinomial_flag_against_binomial_field_is_rejected() {
+        let result =
+            create_alu_air::<Goldilocks, BinomialExtensionField<Goldilocks, 2>, 2>(4, 1, 4, true);
+        assert!(result.is_err());
+        let result =
+            create_alu_air::<Goldilocks, BinomialExtensionField<Goldilocks, 5>, 5>(4, 1, 4, true);
+        assert!(result.is_err());
+        let result =
+            create_alu_air::<Goldilocks, BinomialExtensionField<Goldilocks, 5>, 5>(4, 1, 4, false);
         assert!(result.is_ok());
     }
 

@@ -82,6 +82,7 @@ use core::borrow::{Borrow, BorrowMut};
 
 use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
 use p3_circuit::tables::AluTrace;
+use p3_field::extension::trinomial_cubic_mul;
 use p3_field::{BasedVectorSpace, Dup, Field, PrimeCharacteristicRing};
 use p3_lookup::{Count, InteractionBuilder};
 use p3_matrix::Matrix;
@@ -114,26 +115,58 @@ pub enum AluExtMulKind<F: Copy> {
     Binomial { w: F },
     /// Quintic trinomial `X^5 + X^2 - 1` (KoalaBear-style), `D == 5` only.
     QuinticTrinomial,
+    /// Cubic trinomial `X^3 - X - 1` (Goldilocks-style), `D == 3` only.
+    CubicTrinomial,
 }
 
 impl<F: Copy> AluExtMulKind<F> {
+    /// Whether degree `d` has a trinomial reduction (`d == 3`: cubic, `d == 5`: quintic).
+    ///
+    /// At these degrees the trinomial is the only reduction a relation may carry.
+    pub const fn has_trinomial(d: usize) -> bool {
+        matches!(d, 3 | 5)
+    }
+
     /// Resolve the extension-multiplication reduction for degree `d`.
     ///
-    /// `d == 1` is the base field; `d == 5` with `quintic_trinomial` uses the
-    /// quintic trinomial reduction; every other degree is a binomial reduction
-    /// `x^d = w` and therefore requires `w` to be present. Returns `None` when a
-    /// binomial reduction is needed but `w` is `None`, so callers map that to
-    /// their own missing-`W` error.
+    /// `d == 1` is the base field. `trinomial` selects the trinomial reduction for
+    /// this degree: `d == 3` gives the cubic trinomial and `d == 5` the quintic
+    /// trinomial. Every other degree is a binomial reduction `x^d = w` and therefore
+    /// requires `w` to be present. Returns `None` when a binomial reduction is needed
+    /// but `w` is `None`, or when `trinomial` is set at a degree without a trinomial
+    /// reduction, so callers map that to their own error.
     ///
-    /// This is the single source of truth for the `(degree, w, quintic flag)`
-    /// trichotomy shared by the prove, native-verify, and recursive-verify paths.
-    pub fn resolve(d: usize, w: Option<F>, quintic_trinomial: bool) -> Option<Self> {
-        if d == 1 {
-            Some(Self::Base)
-        } else if d == 5 && quintic_trinomial {
-            Some(Self::QuinticTrinomial)
-        } else {
-            w.map(|w| Self::Binomial { w })
+    /// This is the single source of truth for the `(degree, w, trinomial flag)`
+    /// mapping shared by the prove, native-verify, and recursive-verify paths;
+    /// [`Self::w_and_trinomial`] is its inverse.
+    pub fn resolve(d: usize, w: Option<F>, trinomial: bool) -> Option<Self> {
+        match (d, trinomial) {
+            (3, true) => Some(Self::CubicTrinomial),
+            (5, true) => Some(Self::QuinticTrinomial),
+            (_, true) => None,
+            (1, false) => Some(Self::Base),
+            (_, false) => w.map(|w| Self::Binomial { w }),
+        }
+    }
+
+    /// The `(w, trinomial flag)` pair this reduction is recorded as in proof metadata.
+    pub const fn w_and_trinomial(self) -> (Option<F>, bool) {
+        match self {
+            Self::Base => (None, false),
+            Self::Binomial { w } => (Some(w), false),
+            Self::QuinticTrinomial | Self::CubicTrinomial => (None, true),
+        }
+    }
+
+    /// Whether this reduction is the canonical one for degree `d`: the base field for
+    /// `d == 1`, the matching trinomial where [`Self::has_trinomial`] holds, and a
+    /// binomial for every other `d > 1`.
+    pub const fn is_canonical_for_degree(&self, d: usize) -> bool {
+        match self {
+            Self::Base => d == 1,
+            Self::Binomial { .. } => d > 1 && !Self::has_trinomial(d),
+            Self::QuinticTrinomial => d == 5,
+            Self::CubicTrinomial => d == 3,
         }
     }
 }
@@ -277,7 +310,7 @@ impl<F: Field + PrimeCharacteristicRing + Copy, const D: usize> AluAir<F, D> {
         assert!(lanes > 0, "lane count must be non-zero");
         assert!(
             D == 1,
-            "Base-field constructor requires D == 1; use new_binomial or new_quintic_trinomial"
+            "Base-field constructor requires D == 1; use new_binomial, new_cubic_trinomial or new_quintic_trinomial"
         );
         Self::from_reduction(num_ops, lanes, AluExtMulKind::Base)
     }
@@ -292,7 +325,7 @@ impl<F: Field + PrimeCharacteristicRing + Copy, const D: usize> AluAir<F, D> {
         assert!(lanes > 0, "lane count must be non-zero");
         assert!(
             D == 1,
-            "Base-field constructor requires D == 1; use new_binomial_with_preprocessed or new_quintic_trinomial_with_preprocessed"
+            "Base-field constructor requires D == 1; use new_binomial_with_preprocessed, new_cubic_trinomial_with_preprocessed or new_quintic_trinomial_with_preprocessed"
         );
         assert!(
             horner_packed_steps >= 1,
@@ -362,6 +395,36 @@ impl<F: Field + PrimeCharacteristicRing + Copy, const D: usize> AluAir<F, D> {
             num_ops,
             lanes,
             AluExtMulKind::QuinticTrinomial,
+            preprocessed,
+            horner_packed_steps,
+        )
+    }
+
+    /// Cubic trinomial extension (`X^3 - X - 1`), `D = 3` only.
+    pub const fn new_cubic_trinomial(num_ops: usize, lanes: usize) -> Self {
+        assert!(lanes > 0, "lane count must be non-zero");
+        assert!(D == 3, "Cubic trinomial ALU requires D = 3");
+        Self::from_reduction(num_ops, lanes, AluExtMulKind::CubicTrinomial)
+    }
+
+    /// Cubic trinomial extension with preprocessed columns, `D = 3` only.
+    pub fn new_cubic_trinomial_with_preprocessed(
+        num_ops: usize,
+        lanes: usize,
+        preprocessed: Vec<F>,
+        horner_packed_steps: usize,
+    ) -> Self {
+        assert!(lanes > 0, "lane count must be non-zero");
+        assert!(D == 3, "Cubic trinomial ALU requires D = 3");
+        assert!(
+            horner_packed_steps >= 1,
+            "horner_packed_steps must be positive"
+        );
+
+        Self::from_reduction_with_preprocessed(
+            num_ops,
+            lanes,
+            AluExtMulKind::CubicTrinomial,
             preprocessed,
             horner_packed_steps,
         )
@@ -842,6 +905,21 @@ fn ext_mul_quintic_trinomial<AB: AirBuilder>(x: &[AB::Var], y: &[AB::Var]) -> Ve
     ]
 }
 
+/// Extension multiply in `GF(p)[X]/(X^3 - X - 1)` (Goldilocks-style), on `AB::Expr`.
+///
+/// Delegates to [`trinomial_cubic_mul`], the routine native `CubicTrinomialExtensionField`
+/// multiplication uses, so the constraint matches native arithmetic by construction.
+#[inline]
+fn ext_mul_cubic_trinomial<AB: AirBuilder>(x: &[AB::Var], y: &[AB::Var]) -> Vec<AB::Expr> {
+    debug_assert_eq!(x.len(), 3);
+    debug_assert_eq!(y.len(), 3);
+    let a: [AB::Expr; 3] = core::array::from_fn(|i| x[i].into());
+    let b: [AB::Expr; 3] = core::array::from_fn(|j| y[j].into());
+    let mut res = [AB::Expr::ZERO, AB::Expr::ZERO, AB::Expr::ZERO];
+    trinomial_cubic_mul(&a, &b, &mut res);
+    res.to_vec()
+}
+
 impl<AB: AirBuilder + InteractionBuilder, const D: usize> Air<AB> for AluAir<AB::F, D>
 where
     AB::F: Field + Copy,
@@ -875,6 +953,9 @@ where
                 AluExtMulKind::QuinticTrinomial => {
                     debug_assert_eq!(D, 5, "QuinticTrinomial requires D == 5");
                 }
+                AluExtMulKind::CubicTrinomial => {
+                    debug_assert_eq!(D, 3, "CubicTrinomial requires D == 3");
+                }
             }
         }
 
@@ -885,6 +966,7 @@ where
         let ext_mul_lane = |x: &[AB::Var], y: &[AB::Var]| -> Vec<AB::Expr> {
             match kind {
                 AluExtMulKind::QuinticTrinomial => ext_mul_quintic_trinomial::<AB>(x, y),
+                AluExtMulKind::CubicTrinomial => ext_mul_cubic_trinomial::<AB>(x, y),
                 _ => ext_mul_binomial::<AB, D>(x, y, &w),
             }
         };
@@ -1195,7 +1277,9 @@ mod tests {
 
     use p3_circuit::WitnessId;
     use p3_circuit::ops::AluOpKind;
-    use p3_field::extension::{BinomiallyExtendable, QuinticTrinomialExtensionField};
+    use p3_field::extension::{
+        BinomiallyExtendable, CubicTrinomialExtensionField, QuinticTrinomialExtensionField,
+    };
     use p3_field::{BasedVectorSpace, ExtensionField};
     use p3_matrix::Matrix;
     use p3_test_utils::baby_bear_params::{
@@ -1483,6 +1567,28 @@ mod tests {
         if let Err((row, failures)) = check_air_satisfies::<KoalaBear, Ext, _>(&air, &matrix, &[]) {
             panic!(
                 "family=alu-reference field=KoalaBear/D5 seed={case_seed} op=row-{row} mutation=none expected-stage=local-air-satisfaction failures={failures}"
+            );
+        }
+    }
+
+    fn run_assurance_alu_goldilocks_d3(case_seed: u64) {
+        const TAG: u64 = 0x414c_5547_4c33_0003;
+        type Ext = CubicTrinomialExtensionField<Goldilocks>;
+        let trace = generated_alu_trace::<Goldilocks, Ext, 3>(case_seed, TAG);
+        assert_alu_trace_matches_reference(&trace, case_seed, "Goldilocks/D3");
+        let (lanes, horner_k) = assurance_lanes_and_horner_k(case_seed);
+        let preprocessed = trace_to_preprocessed::<Goldilocks, _, 3>(&trace);
+        let air = AluAir::<Goldilocks, 3>::new_cubic_trinomial_with_preprocessed(
+            trace.values.len(),
+            lanes,
+            preprocessed,
+            horner_k,
+        );
+        let matrix = air.trace_to_matrix(&trace, 1);
+        if let Err((row, failures)) = check_air_satisfies::<Goldilocks, Ext, _>(&air, &matrix, &[])
+        {
+            panic!(
+                "family=alu-reference field=Goldilocks/D3 seed={case_seed} op=row-{row} mutation=none expected-stage=local-air-satisfaction failures={failures}"
             );
         }
     }
@@ -1843,6 +1949,236 @@ mod tests {
     #[test]
     fn assurance_alu_reference_koalabear_d5() {
         for_assurance_cases(run_assurance_alu_koalabear_d5);
+    }
+
+    #[test]
+    fn assurance_alu_reference_goldilocks_d3() {
+        for_assurance_cases(run_assurance_alu_goldilocks_d3);
+    }
+
+    /// The cubic-trinomial constraint is the native product: `X^3 = X + 1`, so
+    /// `X * X^2 = 1 + X`, and a generic product matches `CubicTrinomialExtensionField`.
+    #[test]
+    fn cubic_trinomial_ext_mul_matches_native() {
+        type Ext = CubicTrinomialExtensionField<Goldilocks>;
+        let x = Ext::from_basis_coefficients_slice(&[
+            Goldilocks::ZERO,
+            Goldilocks::ONE,
+            Goldilocks::ZERO,
+        ])
+        .unwrap();
+        let x2 = x * x;
+        assert_eq!(
+            BasedVectorSpace::<Goldilocks>::as_basis_coefficients_slice(&(x * x2)),
+            &[Goldilocks::ONE, Goldilocks::ONE, Goldilocks::ZERO]
+        );
+
+        let trace = AluTrace {
+            op_kind: vec![AluOpKind::Mul],
+            values: vec![[x, x2, Ext::ZERO, x * x2]],
+            indices: vec![[WitnessId(1), WitnessId(2), WitnessId(0), WitnessId(3)]],
+        };
+        let preprocessed = trace_to_preprocessed::<Goldilocks, _, 3>(&trace);
+        let air =
+            AluAir::<Goldilocks, 3>::new_cubic_trinomial_with_preprocessed(1, 1, preprocessed, 1);
+        let matrix = air.trace_to_matrix(&trace, 1);
+        assert_air_satisfies::<Goldilocks, Ext, _>(&air, &matrix);
+    }
+
+    /// Negative: a mutated `out` on a MUL, MUL_ADD or HORNER_ACC row of a Goldilocks D3
+    /// trace must violate the cubic-trinomial constraints.
+    #[test]
+    fn cubic_trinomial_rejects_mutated_out() {
+        type Ext = CubicTrinomialExtensionField<Goldilocks>;
+        const TAG: u64 = 0x414c_5547_4c33_0bad;
+        // Rows of `generated_alu_trace`: 1 = MUL, 2 = MUL_ADD, 3..7 = HORNER_ACC.
+        for (op, lanes, horner_k) in [
+            (1, 1, 1),
+            (2, 1, 1),
+            (4, 1, 1),
+            (6, 1, 1),
+            (1, 2, 4),
+            (2, 4, 2),
+        ] {
+            for coefficient in 0..3 {
+                let mut trace = generated_alu_trace::<Goldilocks, Ext, 3>(op as u64, TAG);
+                let mut out = BasedVectorSpace::<Goldilocks>::as_basis_coefficients_slice(
+                    &trace.values[op][3],
+                )
+                .to_vec();
+                out[coefficient] += Goldilocks::ONE;
+                trace.values[op][3] = Ext::from_basis_coefficients_slice(&out).unwrap();
+
+                let preprocessed = trace_to_preprocessed::<Goldilocks, _, 3>(&trace);
+                let air = AluAir::<Goldilocks, 3>::new_cubic_trinomial_with_preprocessed(
+                    trace.values.len(),
+                    lanes,
+                    preprocessed,
+                    horner_k,
+                );
+                let matrix = air.trace_to_matrix(&trace, 1);
+                assert!(
+                    check_air_satisfies::<Goldilocks, Ext, _>(&air, &matrix, &[]).is_err(),
+                    "mutated out (op {op}, coefficient {coefficient}, lanes {lanes}, k {horner_k}) was accepted"
+                );
+            }
+        }
+    }
+
+    /// Negative: an `out` computed with the binomial reduction `x^3 = W` (for any `W`, here
+    /// the honest product's reduction swapped out) must not satisfy the cubic-trinomial AIR.
+    #[test]
+    fn cubic_trinomial_rejects_binomial_product() {
+        type Ext = CubicTrinomialExtensionField<Goldilocks>;
+        let a = [
+            Goldilocks::from_u64(3),
+            Goldilocks::from_u64(5),
+            Goldilocks::from_u64(7),
+        ];
+        let b = [
+            Goldilocks::from_u64(11),
+            Goldilocks::from_u64(13),
+            Goldilocks::from_u64(17),
+        ];
+        // Schoolbook product reduced with `x^3 = 1`, the binomial a mistaken dispatch would use.
+        let mut wrong = [Goldilocks::ZERO; 3];
+        for i in 0..3 {
+            for j in 0..3 {
+                wrong[(i + j) % 3] += a[i] * b[j];
+            }
+        }
+        let a = Ext::from_basis_coefficients_slice(&a).unwrap();
+        let b = Ext::from_basis_coefficients_slice(&b).unwrap();
+        let wrong = Ext::from_basis_coefficients_slice(&wrong).unwrap();
+        assert_ne!(a * b, wrong);
+
+        let trace = AluTrace {
+            op_kind: vec![AluOpKind::Mul],
+            values: vec![[a, b, Ext::ZERO, wrong]],
+            indices: vec![[WitnessId(1), WitnessId(2), WitnessId(0), WitnessId(3)]],
+        };
+        let preprocessed = trace_to_preprocessed::<Goldilocks, _, 3>(&trace);
+        let air =
+            AluAir::<Goldilocks, 3>::new_cubic_trinomial_with_preprocessed(1, 1, preprocessed, 1);
+        let matrix = air.trace_to_matrix(&trace, 1);
+        assert_air_rejects::<Goldilocks, Ext, _>(&air, &matrix);
+    }
+
+    #[test]
+    fn resolve_maps_trinomial_flag_by_degree() {
+        type K = AluExtMulKind<Val>;
+        let w = Val::from_u64(11);
+        assert_eq!(K::resolve(1, None, false), Some(K::Base));
+        assert_eq!(K::resolve(3, None, true), Some(K::CubicTrinomial));
+        assert_eq!(K::resolve(5, None, true), Some(K::QuinticTrinomial));
+        assert_eq!(K::resolve(4, Some(w), false), Some(K::Binomial { w }));
+        // The flag selects the trinomial even when a `W` is present.
+        assert_eq!(K::resolve(3, Some(w), true), Some(K::CubicTrinomial));
+        // A trinomial flag at a degree without a trinomial is rejected.
+        for d in [1, 2, 4, 6, 8] {
+            assert_eq!(K::resolve(d, Some(w), true), None, "d = {d}");
+        }
+        // A trinomial degree without the flag and without `W` has no reduction.
+        assert_eq!(K::resolve(3, None, false), None);
+        assert_eq!(K::resolve(5, None, false), None);
+
+        for kind in [
+            K::Base,
+            K::Binomial { w },
+            K::QuinticTrinomial,
+            K::CubicTrinomial,
+        ] {
+            let d = match kind {
+                K::Base => 1,
+                K::Binomial { .. } => 4,
+                K::QuinticTrinomial => 5,
+                K::CubicTrinomial => 3,
+            };
+            let (w, trinomial) = kind.w_and_trinomial();
+            assert_eq!(K::resolve(d, w, trinomial), Some(kind));
+        }
+    }
+
+    #[test]
+    fn canonical_reduction_per_degree() {
+        type K = AluExtMulKind<Val>;
+        let w = Val::from_u64(11);
+        for d in [1, 2, 3, 4, 5, 6, 8] {
+            assert_eq!(K::Base.is_canonical_for_degree(d), d == 1, "Base, d = {d}");
+            assert_eq!(
+                K::Binomial { w }.is_canonical_for_degree(d),
+                matches!(d, 2 | 4 | 6 | 8),
+                "Binomial, d = {d}"
+            );
+            assert_eq!(
+                K::CubicTrinomial.is_canonical_for_degree(d),
+                d == 3,
+                "Cubic, d = {d}"
+            );
+            assert_eq!(
+                K::QuinticTrinomial.is_canonical_for_degree(d),
+                d == 5,
+                "Quintic, d = {d}"
+            );
+        }
+    }
+
+    /// Maximum symbolic constraint degree of an ALU AIR (the degree is field-independent, so
+    /// BabyBear stands in for every field).
+    fn max_alu_constraint_degree<const D: usize>(
+        kind: AluExtMulKind<Val>,
+        horner_k: usize,
+    ) -> usize {
+        use p3_air::AirLayout;
+        use p3_batch_stark::symbolic::get_symbolic_constraints;
+        use p3_lookup::Lookups;
+        use p3_lookup::logup::LogUpGadget;
+
+        let num_ops = 8;
+        let lanes = 2;
+        let preprocessed = vec![Val::ZERO; num_ops * AluAir::<Val, D>::preprocessed_lane_width()];
+        let air = AluAir::<Val, D>::from_reduction_with_preprocessed(
+            num_ops,
+            lanes,
+            kind,
+            preprocessed,
+            horner_k,
+        );
+        let layout = AirLayout {
+            preprocessed_width: air.preprocessed_trace().map_or(0, |m| m.width()),
+            main_width: BaseAir::<Val>::width(&air),
+            num_public_values: BaseAir::<Val>::num_public_values(&air),
+            permutation_width: 0,
+            num_permutation_challenges: 0,
+            num_permutation_values: 0,
+            num_periodic_columns: 0,
+        };
+        let lookups: Lookups<Val> = Lookups::from_air::<EF, _>(&air);
+        let (base, ext) =
+            get_symbolic_constraints::<Val, EF, _, _>(&air, layout, &lookups, &LogUpGadget::new());
+        base.iter()
+            .map(|c| c.degree_multiple())
+            .chain(ext.iter().map(|c| c.degree_multiple()))
+            .max()
+            .unwrap()
+    }
+
+    /// The cubic-trinomial ALU keeps the constraint degree of the binomial and quintic ALUs (3).
+    #[test]
+    fn cubic_trinomial_constraint_degree_matches_other_reductions() {
+        for horner_k in [1, 2, 4] {
+            let cubic = max_alu_constraint_degree::<3>(AluExtMulKind::CubicTrinomial, horner_k);
+            let quintic = max_alu_constraint_degree::<5>(AluExtMulKind::QuinticTrinomial, horner_k);
+            let binomial = max_alu_constraint_degree::<4>(
+                AluExtMulKind::Binomial {
+                    w: Val::from_u64(11),
+                },
+                horner_k,
+            );
+            assert_eq!(cubic, 3, "k = {horner_k}");
+            assert_eq!(cubic, quintic, "k = {horner_k}");
+            assert_eq!(cubic, binomial, "k = {horner_k}");
+        }
     }
 
     #[test]

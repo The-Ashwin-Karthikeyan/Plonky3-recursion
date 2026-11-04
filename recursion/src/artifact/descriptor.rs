@@ -573,6 +573,7 @@ pub(crate) fn write_relation<F: PrimeField64>(
             writer.write_field(field, w)?;
         }
         AluExtMulKind::QuinticTrinomial => writer.write_u8(2)?,
+        AluExtMulKind::CubicTrinomial => writer.write_u8(3)?,
     }
     write_air_variant(writer, relation.alu_variant)?;
     writer.write_u8(match relation.constraint_profile {
@@ -643,6 +644,7 @@ fn read_relation_inner<F: PrimeField64>(
             w: reader.read_field(field)?,
         },
         2 => AluExtMulKind::QuinticTrinomial,
+        3 => AluExtMulKind::CubicTrinomial,
         tag => {
             return Err(ArtifactError::InvalidTag {
                 component: "extension reduction",
@@ -1007,11 +1009,12 @@ fn validate_relation_descriptor<F: Copy>(
     {
         return Err(ArtifactError::NonCanonicalMetadata);
     }
-    match relation.reduction {
-        AluExtMulKind::Base if relation.ext_degree == 1 => {}
-        AluExtMulKind::Binomial { .. } if relation.ext_degree > 1 => {}
-        AluExtMulKind::QuinticTrinomial if relation.ext_degree == 5 => {}
-        _ => return Err(ArtifactError::NonCanonicalMetadata),
+    // Base for degree 1, the trinomial for degrees 3 and 5, a binomial otherwise.
+    if !relation
+        .reduction
+        .is_canonical_for_degree(relation.ext_degree)
+    {
+        return Err(ArtifactError::NonCanonicalMetadata);
     }
     Ok(())
 }
@@ -1547,6 +1550,83 @@ mod tests {
         descriptor.non_primitives[0].public_values = NpoPublicValuesV1::Statement { width: 1 };
         assert_eq!(
             validate_relation_descriptor(&descriptor),
+            Err(ArtifactError::NonCanonicalMetadata)
+        );
+    }
+
+    /// A binomial relation is non-canonical at the trinomial degrees: Goldilocks has no
+    /// binomial cubic and KoalaBear no binomial quintic, so degree 3 and 5 relations must
+    /// carry the matching trinomial.
+    #[test]
+    fn relation_validation_rejects_binomial_at_trinomial_degrees() {
+        for degree in [3, 5] {
+            let mut descriptor = relation();
+            descriptor.ext_degree = degree;
+            descriptor.reduction = AluExtMulKind::Binomial {
+                w: BabyBear::from_u32(11),
+            };
+            assert_eq!(
+                validate_relation_descriptor(&descriptor),
+                Err(ArtifactError::NonCanonicalMetadata),
+                "degree {degree}"
+            );
+        }
+    }
+
+    #[test]
+    fn relation_validation_binds_each_trinomial_to_its_degree() {
+        for (degree, reduction, ok) in [
+            (3, AluExtMulKind::CubicTrinomial, true),
+            (5, AluExtMulKind::QuinticTrinomial, true),
+            (3, AluExtMulKind::QuinticTrinomial, false),
+            (5, AluExtMulKind::CubicTrinomial, false),
+            (4, AluExtMulKind::CubicTrinomial, false),
+            (1, AluExtMulKind::CubicTrinomial, false),
+            (3, AluExtMulKind::Base, false),
+        ] {
+            let mut descriptor = relation();
+            descriptor.ext_degree = degree;
+            descriptor.reduction = reduction;
+            assert_eq!(
+                validate_relation_descriptor(&descriptor).is_ok(),
+                ok,
+                "degree {degree}, {reduction:?}"
+            );
+        }
+    }
+
+    /// The cubic trinomial is wire tag 3 and round-trips through the relation codec.
+    #[test]
+    fn relation_codec_roundtrips_cubic_trinomial() {
+        let mut expected = relation();
+        expected.ext_degree = 3;
+        expected.reduction = AluExtMulKind::CubicTrinomial;
+        let limits = ArtifactLimits::default();
+        let field = crate::artifact::wire::FieldEncoding::<BabyBear>::u32();
+        let mut writer = Writer::new(4096);
+        write_relation(&mut writer, &expected, field).unwrap();
+        let bytes = writer.finish().unwrap();
+
+        let mut reader = Reader::new(&bytes, &limits);
+        assert_eq!(read_relation(&mut reader, field), Ok(expected.clone()));
+        reader.finish().unwrap();
+
+        // The same relation with the quintic tag (2) in place of the cubic tag (3) decodes
+        // to a quintic relation at degree 3, which the decoder rejects.
+        let mut quintic = expected;
+        quintic.reduction = AluExtMulKind::QuinticTrinomial;
+        let mut quintic_writer = Writer::new(4096);
+        write_relation(&mut quintic_writer, &quintic, field).unwrap();
+        let quintic_bytes = quintic_writer.finish().unwrap();
+        assert_eq!(quintic_bytes.len(), bytes.len());
+        let diff: Vec<usize> = (0..bytes.len())
+            .filter(|&i| bytes[i] != quintic_bytes[i])
+            .collect();
+        assert_eq!(diff.len(), 1);
+        assert_eq!((bytes[diff[0]], quintic_bytes[diff[0]]), (3, 2));
+        let mut reader = Reader::new(&quintic_bytes, &limits);
+        assert_eq!(
+            read_relation(&mut reader, field),
             Err(ArtifactError::NonCanonicalMetadata)
         );
     }

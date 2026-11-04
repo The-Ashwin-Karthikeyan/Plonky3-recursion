@@ -66,3 +66,11 @@ fn alu_quintic_trinomial_air_shape_is_stable() {
     let d5 = AluAir::<F, 5>::new_quintic_trinomial(0, 1);
     assert_eq!((d5.width(), d5.preprocessed_width()), (35, 20));
 }
+
+#[test]
+fn alu_cubic_trinomial_air_shape_is_stable() {
+    let d3_lane1 = AluAir::<F, 3>::new_cubic_trinomial(0, 1);
+    let d3_lane2 = AluAir::<F, 3>::new_cubic_trinomial(0, 2);
+    assert_eq!((d3_lane1.width(), d3_lane1.preprocessed_width()), (21, 20));
+    assert_eq!((d3_lane2.width(), d3_lane2.preprocessed_width()), (33, 33));
+}

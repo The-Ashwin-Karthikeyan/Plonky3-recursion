@@ -4,6 +4,8 @@
 //! - `F`: Base field (BabyBear/KoalaBear/Goldilocks) that extension fields are built over.
 //! - `EF`: Element field for circuit traces. If `EF = F`, there is no binomial parameter. If
 //!   `EF = BinomialExtensionField<F, D>`, then there is a binomial parameter `W` with `x^D = W`.
+//!   If `EF` is a cubic or quintic trinomial extension, there is no `W` and the ALU uses the
+//!   trinomial reduction for that degree.
 //! - `D`: Element-field extension degree.
 //!
 //! Provides traits to dynamically determine binomial extension parameters
@@ -11,8 +13,8 @@
 
 use p3_field::Field;
 use p3_field::extension::{
-    BinomialExtensionField, BinomiallyExtendable, QuinticTrinomialExtendable,
-    QuinticTrinomialExtensionField,
+    BinomialExtensionField, BinomiallyExtendable, CubicTrinomialExtendable,
+    CubicTrinomialExtensionField, QuinticTrinomialExtendable, QuinticTrinomialExtensionField,
 };
 
 /// Extract binomial parameters from field types.
@@ -24,9 +26,12 @@ pub trait ExtractBinomialW<F: Field> {
     /// Returns None for base fields, Some(W) for supported binomial extensions.
     fn extract_w() -> Option<F>;
 
-    /// When true and `D == 5`, the ALU uses the trinomial reduction `X^5 + X^2 - 1`
-    /// instead of a binomial `x^5 = W`.
-    fn alu_is_quintic_trinomial() -> bool {
+    /// When true, the ALU uses the trinomial reduction for this degree instead of a binomial
+    /// `x^D = W`: `X^3 - X - 1` for `D == 3`, `X^5 + X^2 - 1` for `D == 5`.
+    ///
+    /// Only trinomial extensions return true; this is the value recorded in the proof's
+    /// `alu_quintic_trinomial` flag.
+    fn alu_is_trinomial() -> bool {
         false
     }
 }
@@ -59,7 +64,20 @@ where
         None
     }
 
-    fn alu_is_quintic_trinomial() -> bool {
+    fn alu_is_trinomial() -> bool {
+        true
+    }
+}
+
+impl<F> ExtractBinomialW<F> for CubicTrinomialExtensionField<F>
+where
+    F: Field + CubicTrinomialExtendable,
+{
+    fn extract_w() -> Option<F> {
+        None
+    }
+
+    fn alu_is_trinomial() -> bool {
         true
     }
 }
@@ -67,7 +85,10 @@ where
 #[cfg(test)]
 mod tests {
     use p3_baby_bear::BabyBear;
-    use p3_field::extension::{BinomialExtensionField, QuinticTrinomialExtensionField};
+    use p3_field::extension::{
+        BinomialExtensionField, CubicTrinomialExtensionField, QuinticTrinomialExtensionField,
+    };
+    use p3_goldilocks::Goldilocks;
     use p3_koala_bear::KoalaBear;
 
     use super::*;
@@ -96,19 +117,41 @@ mod tests {
     #[test]
     fn test_quintic_is_trinomial_true() {
         assert!(
-            <QuinticTrinomialExtensionField<KoalaBear> as ExtractBinomialW<KoalaBear>>::alu_is_quintic_trinomial()
+            <QuinticTrinomialExtensionField<KoalaBear> as ExtractBinomialW<KoalaBear>>::alu_is_trinomial()
         );
     }
 
     #[test]
     fn test_base_field_not_trinomial() {
-        assert!(!<BabyBear as ExtractBinomialW<BabyBear>>::alu_is_quintic_trinomial());
+        assert!(!<BabyBear as ExtractBinomialW<BabyBear>>::alu_is_trinomial());
     }
 
     #[test]
     fn test_binomial_extension_not_trinomial() {
         assert!(!<BinomialExtensionField<BabyBear, 4> as ExtractBinomialW<
             BabyBear,
-        >>::alu_is_quintic_trinomial());
+        >>::alu_is_trinomial());
+    }
+
+    #[test]
+    fn test_cubic_extension_returns_none() {
+        assert!(
+            <CubicTrinomialExtensionField<Goldilocks> as ExtractBinomialW<Goldilocks>>::extract_w()
+                .is_none()
+        );
+    }
+
+    #[test]
+    fn test_cubic_is_trinomial_true() {
+        assert!(
+            <CubicTrinomialExtensionField<Goldilocks> as ExtractBinomialW<Goldilocks>>::alu_is_trinomial()
+        );
+    }
+
+    #[test]
+    fn test_goldilocks_quadratic_not_trinomial() {
+        assert!(!<BinomialExtensionField<Goldilocks, 2> as ExtractBinomialW<
+            Goldilocks,
+        >>::alu_is_trinomial());
     }
 }

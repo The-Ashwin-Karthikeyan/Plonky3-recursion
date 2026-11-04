@@ -53,11 +53,8 @@ impl<F: Copy> VerifierManifest<F> {
             });
         }
 
-        let (expected_w, expected_quintic): (Option<Val<SC>>, bool) = match self.reduction {
-            AluExtMulKind::Base => (None, false),
-            AluExtMulKind::Binomial { w } => (Some(w.into()), false),
-            AluExtMulKind::QuinticTrinomial => (None, true),
-        };
+        let (expected_w, expected_quintic) = self.reduction.w_and_trinomial();
+        let expected_w: Option<Val<SC>> = expected_w.map(Into::into);
 
         if proof.w_binomial != expected_w {
             return Err(ProofMetadataError::BinomialWMismatch);

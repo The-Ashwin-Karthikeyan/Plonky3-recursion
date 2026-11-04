@@ -677,7 +677,10 @@ where
     pub ext_degree: usize,
     /// The binomial coefficient `W` for extension field multiplication, if `ext_degree > 1`.
     pub w_binomial: Option<Val<SC>>,
-    /// When `true` with `ext_degree == 5`, the ALU uses quintic trinomial reduction (`X^5+X^2-1`).
+    /// When `true`, the ALU uses the trinomial reduction for `ext_degree`: cubic (`X^3-X-1`)
+    /// for degree 3, quintic (`X^5+X^2-1`) for degree 5. It is invalid at any other degree.
+    ///
+    /// The field keeps its historical name so existing serialized proofs still parse.
     #[serde(default)]
     pub alu_quintic_trinomial: bool,
     /// Manifest describing batched non-primitive tables defined at runtime.
@@ -882,14 +885,8 @@ where
         parts: TrustedBuiltinArtifactRelation<Val<SC>>,
         common: CommonData<SC>,
     ) -> Result<Self, BatchStarkProverError> {
-        let reduction_ok = matches!(
-            parts.reduction,
-            AluExtMulKind::Base if D == 1
-        ) || matches!(
-            parts.reduction,
-            AluExtMulKind::Binomial { .. } if D > 1 && D != 5
-        ) || matches!(parts.reduction, AluExtMulKind::QuinticTrinomial if D == 5);
-        if !reduction_ok {
+        // Base for D == 1, the trinomial for D == 3 and D == 5, a binomial otherwise.
+        if !parts.reduction.is_canonical_for_degree(D) {
             return Err(BatchStarkProverError::RelationMismatch(
                 "extension reduction does not match the circuit degree".into(),
             ));
@@ -1311,9 +1308,10 @@ pub enum ProofMetadataError {
     #[error("proof binomial W does not match the verifier's expected trace field")]
     BinomialWMismatch,
 
-    /// The proof's quintic-trinomial reduction flag does not match the verifier's expected trace field.
+    /// The proof's trinomial reduction flag (`alu_quintic_trinomial`) does not match the
+    /// verifier's expected trace field.
     #[error(
-        "proof quintic-trinomial flag {got} does not match the verifier's expected trace field ({expected})"
+        "proof trinomial-reduction flag {got} does not match the verifier's expected trace field ({expected})"
     )]
     QuinticReductionMismatch { expected: bool, got: bool },
 
@@ -1412,7 +1410,8 @@ pub enum BatchStarkProverError {
     #[error("unsupported extension degree: {0} (supported: 1,2,4,5,6,8)")]
     UnsupportedDegree(usize),
 
-    /// An extension field with degree > 1 was requested but the binomial parameter `W` was not provided.
+    /// An extension field with degree > 1 was requested but the binomial parameter `W` was not
+    /// provided, or the trinomial flag was set at a degree without a trinomial reduction.
     #[error("missing binomial parameter W for extension-field multiplication")]
     MissingWForExtension,
 
@@ -1941,7 +1940,7 @@ where
     /// data, rows, packing, and NPO identity from `proof` itself. It is therefore not a trusted
     /// relation/key boundary. Direct trusted callers must use [`CircuitVerifier::verify`].
     ///
-    /// `EF` is the verifier's **expected trace element field**. Its degree and binomial/quintic
+    /// `EF` is the verifier's **expected trace element field**. Its degree and binomial/trinomial
     /// reduction parameters are derived verifier-side and bound against the proof's declared
     /// `ext_degree`/`w_binomial`/`alu_quintic_trinomial` before any AIR is reconstructed, so the
     /// verified extension-arithmetic relation is verifier-chosen rather than proof-chosen.
@@ -1962,7 +1961,7 @@ where
         } else {
             None
         };
-        let expected_quintic = EF::DIMENSION == 5 && EF::alu_is_quintic_trinomial();
+        let expected_quintic = EF::alu_is_trinomial();
 
         if proof.ext_degree != EF::DIMENSION {
             return Err(ProofMetadataError::ExtDegreeMismatch {
@@ -2115,7 +2114,7 @@ where
         let alu_prep = &primitive[PrimitiveOpType::Alu as usize];
         let alu_num_ops = alu_prep.len() / AluAir::<Val<SC>, D>::preprocessed_lane_width();
         let horner_k = packing.horner_packed_steps();
-        let alu_quintic = D == 5 && EF::alu_is_quintic_trinomial();
+        let alu_quintic = EF::alu_is_trinomial();
         let reduction = AluExtMulKind::resolve(D, w_binomial, alu_quintic)
             .ok_or(BatchStarkProverError::MissingWForExtension)?;
         // The packed-Horner schedule and the resulting preprocessed trace matrix depend only on
@@ -2543,11 +2542,7 @@ where
             alu_quintic_trinomial,
             non_primitives,
         ) = if let Some(relation) = trusted_relation {
-            let (w, quintic) = match relation.reduction() {
-                AluExtMulKind::Base => (None, false),
-                AluExtMulKind::Binomial { w } => (Some(w), false),
-                AluExtMulKind::QuinticTrinomial => (None, true),
-            };
+            let (w, quintic) = relation.reduction().w_and_trinomial();
             (
                 relation.table_packing().clone(),
                 *relation.rows(),
@@ -2636,9 +2631,8 @@ where
                 .with_min_height(public_min_height),
         );
         let horner_k = packing.horner_packed_steps();
-        let reduction =
-            AluExtMulKind::resolve(D, w_binomial, D == 5 && proof.alu_quintic_trinomial)
-                .ok_or(BatchStarkProverError::MissingWForExtension)?;
+        let reduction = AluExtMulKind::resolve(D, w_binomial, proof.alu_quintic_trinomial)
+            .ok_or(BatchStarkProverError::MissingWForExtension)?;
         let alu_air: CircuitTableAir<SC, D> = CircuitTableAir::Alu(
             AluAir::<Val<SC>, D>::from_reduction(
                 proof.rows[PrimitiveTable::Alu],
@@ -2830,11 +2824,7 @@ where
 
     fn validate_metadata(&self, proof: &BatchStarkProof<SC>) -> Result<(), BatchStarkProverError> {
         let relation = &self.inner.relation;
-        let (expected_w, expected_quintic) = match relation.reduction() {
-            AluExtMulKind::Base => (None, false),
-            AluExtMulKind::Binomial { w } => (Some(w), false),
-            AluExtMulKind::QuinticTrinomial => (None, true),
-        };
+        let (expected_w, expected_quintic) = relation.reduction().w_and_trinomial();
         if proof.w_binomial != expected_w {
             return Err(ProofMetadataError::BinomialWMismatch.into());
         }

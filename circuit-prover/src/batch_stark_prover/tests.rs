@@ -821,6 +821,59 @@ fn independently_trusted_builtin_artifact_rejects_common_routing_substitution() 
     ));
 }
 
+/// The trusted-artifact import accepts only the canonical reduction for its degree: in
+/// particular a binomial relation is rejected at the trinomial degrees 3 and 5, since the
+/// Goldilocks cubic and KoalaBear quintic extensions have no binomial form.
+#[test]
+fn independently_trusted_builtin_artifact_rejects_non_canonical_reduction() {
+    fn import_at<const D: usize>(
+        verifier: &CircuitVerifier<config::BabyBearConfig>,
+        reduction: crate::air::AluExtMulKind<BabyBear>,
+    ) -> Result<CircuitVerifier<config::BabyBearConfig>, BatchStarkProverError> {
+        let relation = verifier.relation();
+        let parts = crate::TrustedBuiltinArtifactRelation::try_new(
+            relation.table_packing().clone(),
+            *relation.rows(),
+            relation.ext_degree(),
+            reduction,
+            relation.alu_variant(),
+            relation.constraint_profile(),
+            Vec::new(),
+            relation.statement_layout().schema().clone(),
+            relation.statement_layout().table_instance(),
+            relation.aggregation_statement_layout().cloned(),
+            relation.trace_degree_bits().to_vec(),
+        )
+        .unwrap();
+        CircuitVerifier::from_independently_trusted_builtin_artifact_degree::<D>(
+            verifier.config().clone(),
+            parts,
+            clone_common_data(verifier.common_data()),
+        )
+    }
+
+    use crate::air::AluExtMulKind::{Base, Binomial, CubicTrinomial, QuinticTrinomial};
+    let circuit = trusted_relation_circuit(2);
+    let prepared = BatchStarkProver::new(config::baby_bear())
+        .prepare_circuit::<BabyBear, 1>(&circuit, &[], &[], ConstraintProfile::Standard)
+        .unwrap();
+    let verifier = prepared.verifier();
+    let w = BabyBear::from_u32(11);
+    let is_mismatch = |result: Result<_, BatchStarkProverError>| {
+        matches!(result, Err(BatchStarkProverError::RelationMismatch(_)))
+    };
+
+    assert!(is_mismatch(import_at::<3>(&verifier, Binomial { w })));
+    assert!(is_mismatch(import_at::<3>(&verifier, QuinticTrinomial)));
+    assert!(is_mismatch(import_at::<3>(&verifier, Base)));
+    assert!(is_mismatch(import_at::<5>(&verifier, Binomial { w })));
+    assert!(is_mismatch(import_at::<5>(&verifier, CubicTrinomial)));
+    assert!(is_mismatch(import_at::<4>(&verifier, CubicTrinomial)));
+    assert!(is_mismatch(import_at::<1>(&verifier, CubicTrinomial)));
+    // The honest D1 import still succeeds.
+    import_at::<1>(&verifier, Base).unwrap();
+}
+
 fn check_trusted_verifier_rejects_seeded_same_shape_foreign_relations(
     corpus: CorpusSpec,
     fixed_input: Option<u32>,

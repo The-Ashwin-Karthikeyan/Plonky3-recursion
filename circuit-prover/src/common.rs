@@ -893,11 +893,10 @@ where
         Ok(log2_ceil_usize(natural_height.max(effective_min)))
     };
 
-    let reduction =
-        AluExtMulKind::resolve(D, w_binomial, D == 5 && ExtF::alu_is_quintic_trinomial()).expect(
-            "ALU preprocessed path needs binomial W when D>1 and the element field is not the \
-         quintic-trinomial ALU variant",
-        );
+    let reduction = AluExtMulKind::resolve(D, w_binomial, ExtF::alu_is_trinomial()).expect(
+        "ALU preprocessed path needs binomial W when D>1 and the element field is not a \
+         trinomial ALU variant",
+    );
 
     let mut table_preps: Vec<(CircuitTableAir<SC, D>, usize)> =
         Vec::with_capacity(base_prep.len() + non_primitive_base.len());

@@ -614,11 +614,7 @@ where
                         component: "table packing copy",
                     })?;
             reader.charge_conversion_vec::<()>(0)?;
-            let (w_binomial, alu_quintic_trinomial) = match relation.reduction() {
-                p3_circuit_prover::air::AluExtMulKind::Base => (None, false),
-                p3_circuit_prover::air::AluExtMulKind::Binomial { w } => (Some(w), false),
-                p3_circuit_prover::air::AluExtMulKind::QuinticTrinomial => (None, true),
-            };
+            let (w_binomial, alu_quintic_trinomial) = relation.reduction().w_and_trinomial();
             let native = BatchStarkProof {
                 proof,
                 table_packing,
