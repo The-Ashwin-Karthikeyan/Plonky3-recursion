@@ -79,6 +79,16 @@ impl Poseidon2Params for GoldilocksD2Width8 {
     const CONFIG: Poseidon2Config = Poseidon2Config::GOLDILOCKS_D2_W8;
 }
 
+/// Goldilocks D=3 Width=12 configuration (matches Poseidon2Goldilocks<12>).
+///
+/// The state is four cubic-extension limbs: two rate limbs and two capacity limbs.
+pub struct GoldilocksD3Width12;
+
+impl Poseidon2Params for GoldilocksD3Width12 {
+    type BaseField = p3_goldilocks::Goldilocks;
+    const CONFIG: Poseidon2Config = Poseidon2Config::GOLDILOCKS_D3_W12;
+}
+
 /// Poseidon2 operation table row.
 ///
 /// This implements the Poseidon Permutation Table specification.
@@ -356,5 +366,19 @@ mod tests {
     #[test]
     fn test_goldilocks_d2_d_is_two() {
         assert_eq!(<GoldilocksD2Width8 as Poseidon2Params>::D, 2);
+    }
+
+    #[test]
+    fn test_goldilocks_d3_width12_params() {
+        type P = GoldilocksD3Width12;
+        assert_eq!(<P as Poseidon2Params>::D, 3);
+        assert_eq!(<P as Poseidon2Params>::WIDTH, 12);
+        assert_eq!(
+            <P as Poseidon2Params>::D * <P as Poseidon2Params>::WIDTH_EXT,
+            <P as Poseidon2Params>::WIDTH,
+        );
+        assert_eq!(<P as Poseidon2Params>::RATE_EXT, 2);
+        assert_eq!(<P as Poseidon2Params>::CAPACITY_EXT, 2);
+        assert_eq!(<P as Poseidon2Params>::CAPACITY_SIZE, 6);
     }
 }

@@ -29,6 +29,7 @@ pub use config::Poseidon2Config;
 pub(crate) use plugin::Poseidon2CircuitPlugin;
 pub use state::Poseidon2PermPrivateData;
 pub use trace::{
-    BabyBearD1Width16, GoldilocksD2Width8, KoalaBearD1Width16, Poseidon2CircuitRow,
-    Poseidon2Params, Poseidon2Trace, generate_poseidon2_challenger_trace, generate_poseidon2_trace,
+    BabyBearD1Width16, GoldilocksD2Width8, GoldilocksD3Width12, KoalaBearD1Width16,
+    Poseidon2CircuitRow, Poseidon2Params, Poseidon2Trace, generate_poseidon2_challenger_trace,
+    generate_poseidon2_trace,
 };

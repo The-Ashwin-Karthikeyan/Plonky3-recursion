@@ -417,6 +417,13 @@ impl CircuitChallenger<8, 4, Poseidon2Config> {
     }
 }
 
+impl CircuitChallenger<12, 6, Poseidon2Config> {
+    /// Create a challenger with Goldilocks D3 Width12 configuration.
+    pub const fn new_goldilocks_d3() -> Self {
+        Self::new(Poseidon2Config::GOLDILOCKS_D3_W12)
+    }
+}
+
 impl<const WIDTH: usize, const RATE: usize> CircuitChallenger<WIDTH, RATE, Poseidon1Config> {
     /// Create a Poseidon1 challenger with BabyBear D1 Width16 (base field challenges).
     pub const fn new_babybear_poseidon1_base() -> Self {

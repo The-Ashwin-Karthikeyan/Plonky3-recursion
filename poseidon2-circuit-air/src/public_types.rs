@@ -15,6 +15,7 @@
 //!     KoalaBear   4                  32            31
 //!     Goldilocks  2                   8            22
 //!     Goldilocks  2                  16            22
+//!     Goldilocks  3                  12            22
 //! ```
 
 extern crate alloc;
@@ -22,7 +23,7 @@ extern crate alloc;
 use alloc::vec::Vec;
 
 use p3_baby_bear::{BabyBear, GenericPoseidon2LinearLayersBabyBear};
-use p3_circuit::ops::{GoldilocksD2Width8, Poseidon2Config, Poseidon2Params};
+use p3_circuit::ops::{GoldilocksD2Width8, GoldilocksD3Width12, Poseidon2Config, Poseidon2Params};
 use p3_goldilocks::{GenericPoseidon2LinearLayersGoldilocks, Goldilocks};
 use p3_koala_bear::{GenericPoseidon2LinearLayersKoalaBear, KoalaBear};
 use p3_poseidon2_air::RoundConstants;
@@ -674,6 +675,22 @@ pub type Poseidon2CircuitAirGoldilocksD2Width8 = Poseidon2CircuitAir<
     { GoldilocksD2Width8::D },
 >;
 
+/// Goldilocks Poseidon2 circuit AIR with cubic extension and 12-element state.
+pub type Poseidon2CircuitAirGoldilocksD3Width12 = Poseidon2CircuitAir<
+    Goldilocks,
+    GenericPoseidon2LinearLayersGoldilocks,
+    { GoldilocksD3Width12::D },
+    { GoldilocksD3Width12::WIDTH },
+    { GoldilocksD3Width12::WIDTH_EXT },
+    { GoldilocksD3Width12::RATE_EXT },
+    { GoldilocksD3Width12::CAPACITY_EXT },
+    { GoldilocksD3Width12::SBOX_DEGREE },
+    { GoldilocksD3Width12::SBOX_REGISTERS },
+    { GoldilocksD3Width12::HALF_FULL_ROUNDS },
+    { GoldilocksD3Width12::PARTIAL_ROUNDS },
+    { GoldilocksD3Width12::D },
+>;
+
 /// Generate deterministic round constants for the Goldilocks width-8
 /// configuration using the historical 64-bit generator with a fixed seed.
 pub fn goldilocks_d2_width8_round_constants() -> RoundConstants<Goldilocks, 8, 4, 22> {
@@ -694,6 +711,20 @@ pub fn goldilocks_d2_width16_round_constants() -> RoundConstants<Goldilocks, 16,
     RoundConstants::new(beginning_full, partial, ending_full)
 }
 
+/// Round constants for the Goldilocks width-12 configuration: p3-goldilocks'
+/// reference tables, so the AIR computes exactly
+/// `p3_goldilocks::default_goldilocks_poseidon2_12()`.
+///
+/// `ExternalLayerConstants::new(initial, terminal)` with internal constants maps
+/// to `RoundConstants::new(initial, internal, terminal)`.
+pub const fn goldilocks_d3_width12_round_constants() -> RoundConstants<Goldilocks, 12, 4, 22> {
+    RoundConstants::new(
+        p3_goldilocks::GOLDILOCKS_POSEIDON2_RC_12_EXTERNAL_INITIAL,
+        p3_goldilocks::GOLDILOCKS_POSEIDON2_RC_12_INTERNAL,
+        p3_goldilocks::GOLDILOCKS_POSEIDON2_RC_12_EXTERNAL_FINAL,
+    )
+}
+
 /// Create a Goldilocks width-8 AIR with deterministic round constants and
 /// an empty preprocessed trace.
 pub fn goldilocks_d2_width8_default_air() -> Poseidon2CircuitAirGoldilocksD2Width8 {
@@ -708,6 +739,25 @@ pub fn goldilocks_d2_width8_default_air_with_preprocessed(
 ) -> Poseidon2CircuitAirGoldilocksD2Width8 {
     Poseidon2CircuitAirGoldilocksD2Width8::new_with_preprocessed(
         goldilocks_d2_width8_round_constants(),
+        preprocessed,
+    )
+    .with_min_height(min_height)
+}
+
+/// Create a Goldilocks width-12 AIR with the reference round constants and
+/// an empty preprocessed trace.
+pub const fn goldilocks_d3_width12_default_air() -> Poseidon2CircuitAirGoldilocksD3Width12 {
+    Poseidon2CircuitAirGoldilocksD3Width12::new(goldilocks_d3_width12_round_constants())
+}
+
+/// Create a Goldilocks width-12 AIR with the reference round constants,
+/// pre-populated preprocessed data, and a minimum trace height.
+pub fn goldilocks_d3_width12_default_air_with_preprocessed(
+    preprocessed: Vec<Goldilocks>,
+    min_height: usize,
+) -> Poseidon2CircuitAirGoldilocksD3Width12 {
+    Poseidon2CircuitAirGoldilocksD3Width12::new_with_preprocessed(
+        goldilocks_d3_width12_round_constants(),
         preprocessed,
     )
     .with_min_height(min_height)
@@ -750,6 +800,13 @@ const _: () = assert_circuit_cols_split::<
     { GoldilocksD2Width8::SBOX_REGISTERS },
     { GoldilocksD2Width8::HALF_FULL_ROUNDS },
     { GoldilocksD2Width8::PARTIAL_ROUNDS },
+>();
+const _: () = assert_circuit_cols_split::<
+    { GoldilocksD3Width12::WIDTH },
+    { GoldilocksD3Width12::SBOX_DEGREE },
+    { GoldilocksD3Width12::SBOX_REGISTERS },
+    { GoldilocksD3Width12::HALF_FULL_ROUNDS },
+    { GoldilocksD3Width12::PARTIAL_ROUNDS },
 >();
 
 // Pin the arity-4 circuit-vs-permutation column split for the compression-only

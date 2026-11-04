@@ -3070,4 +3070,186 @@ mod test {
             );
         }
     }
+
+    /// Goldilocks D3/W12: the AIR uses p3-goldilocks' reference round constants, so its trace
+    /// computes `default_goldilocks_poseidon2_12()` and the circuit constraints hold on the
+    /// cubic-limb layout (two rate and two capacity limbs of three coefficients).
+    mod goldilocks_d3_width12 {
+        use core::borrow::Borrow;
+
+        use p3_circuit::ops::{GoldilocksD3Width12, Poseidon2Params};
+        use p3_field::extension::CubicTrinomialExtensionField;
+        use p3_goldilocks::{
+            GOLDILOCKS_POSEIDON2_RC_12_EXTERNAL_FINAL, GOLDILOCKS_POSEIDON2_RC_12_EXTERNAL_INITIAL,
+            GOLDILOCKS_POSEIDON2_RC_12_INTERNAL, Poseidon2Goldilocks,
+            default_goldilocks_poseidon2_12,
+        };
+        use p3_poseidon2_air::Poseidon2Cols;
+
+        use super::*;
+        use crate::{
+            Poseidon2CircuitAirGoldilocksD3Width12, goldilocks_d3_width12_default_air,
+            goldilocks_d3_width12_round_constants,
+        };
+
+        type GlF = Goldilocks;
+        type GlEF = CubicTrinomialExtensionField<GlF>;
+        const W: usize = 12;
+        const D: usize = 3;
+        const LIMBS: usize = <GoldilocksD3Width12 as Poseidon2Params>::WIDTH_EXT;
+        const RATE_LIMBS: usize = <GoldilocksD3Width12 as Poseidon2Params>::RATE_EXT;
+        const PERM_COLS: usize = p3_poseidon2_air::num_cols::<W, 7, 1, 4, 22>();
+
+        /// `test_default_goldilocks_poseidon2_width_12` in p3-goldilocks: the permutation of
+        /// `[0, 1, ..., 11]`. lrup's `poseidon_perm_known_answer` pins the same vector.
+        const KAT_OUTPUT: [u64; W] = [
+            0xf292ab67c0f14b03,
+            0x0a32f1b37656544c,
+            0x053c61ab895498de,
+            0x02ff92e55b196ffb,
+            0x58176e8f6f58cab2,
+            0xb0aa1206e7aec0f8,
+            0xe90c13f3dce83ca4,
+            0xf4da15333edf39c2,
+            0x23b701c053c2ca6c,
+            0xd233d593dcdfbf58,
+            0x4effa5f9516fb52e,
+            0x0aaf4489f1f40166,
+        ];
+
+        fn row(
+            input: [GlF; W],
+            new_start: bool,
+            merkle_path: bool,
+            mmcs_bit: bool,
+        ) -> Poseidon2CircuitRow<GlF> {
+            Poseidon2CircuitRow {
+                challenger: false,
+                new_start,
+                merkle_path,
+                mmcs_bit,
+                mmcs_bit2: false,
+                input_values: input.to_vec().into(),
+                in_ctl: vec![false; LIMBS].into(),
+                input_indices: vec![0; LIMBS].into(),
+                out_ctl: vec![false; RATE_LIMBS].into(),
+                output_indices: vec![0; RATE_LIMBS].into(),
+                mmcs_bit_idx: 0,
+                mmcs_bit2_idx: 0,
+                absorb_len: 0,
+            }
+        }
+
+        fn air_and_trace(
+            rows: Vec<Poseidon2CircuitRow<GlF>>,
+        ) -> (Poseidon2CircuitAirGoldilocksD3Width12, RowMajorMatrix<GlF>) {
+            let mut padded = rows;
+            padded.resize(32, row([GlF::ZERO; W], true, false, false));
+            let preprocessed = extract_preprocessed_from_operations::<LIMBS, RATE_LIMBS, GlF, GlF>(
+                &padded, D as u32, D, false,
+            );
+            let constants = goldilocks_d3_width12_round_constants();
+            let air = Poseidon2CircuitAirGoldilocksD3Width12::new_with_preprocessed(
+                constants.clone(),
+                preprocessed,
+            );
+            let trace = air.generate_trace_rows(&padded, &constants, 0);
+            (air, trace)
+        }
+
+        /// The permutation output that the AIR trace commits to for row `r`.
+        fn trace_output(trace: &RowMajorMatrix<GlF>, r: usize) -> [GlF; W] {
+            let row = trace.row_slice(r).unwrap();
+            let local: &Poseidon2Cols<GlF, W, 7, 1, 4, 22> = row[..PERM_COLS].borrow();
+            local.ending_full_rounds[3].post
+        }
+
+        #[test]
+        fn round_constants_are_the_p3_goldilocks_reference_tables() {
+            let reference = RoundConstants::<GlF, W, 4, 22>::try_from_layers(
+                &ExternalLayerConstants::new(
+                    GOLDILOCKS_POSEIDON2_RC_12_EXTERNAL_INITIAL.to_vec(),
+                    GOLDILOCKS_POSEIDON2_RC_12_EXTERNAL_FINAL.to_vec(),
+                ),
+                &GOLDILOCKS_POSEIDON2_RC_12_INTERNAL,
+            )
+            .unwrap();
+            assert_eq!(
+                alloc::format!("{:?}", goldilocks_d3_width12_round_constants()),
+                alloc::format!("{reference:?}")
+            );
+        }
+
+        #[test]
+        fn known_answer_on_air_trace_and_native_permutation() {
+            let input: [GlF; W] = core::array::from_fn(|i| GlF::from_u64(i as u64));
+            let expected = KAT_OUTPUT.map(GlF::from_u64);
+            assert_eq!(default_goldilocks_poseidon2_12().permute(input), expected);
+
+            let (air, trace) = air_and_trace(vec![row(input, true, false, false)]);
+            assert_eq!(trace_output(&trace, 0), expected);
+            assert_air_satisfies::<GlF, GlEF, _>(&air, &trace);
+        }
+
+        #[test]
+        fn air_trace_matches_native_on_random_rows_and_constraints_hold() {
+            let mut rng = SmallRng::seed_from_u64(0xD3_12);
+            let native: Poseidon2Goldilocks<W> = default_goldilocks_poseidon2_12();
+
+            let mut rows = Vec::new();
+            let mut outputs = Vec::new();
+            let mut push = |input: [GlF; W], new_start, merkle_path, mmcs_bit| {
+                outputs.push(native.permute(input));
+                rows.push(row(input, new_start, merkle_path, mmcs_bit));
+            };
+
+            // Independent random permutations.
+            for _ in 0..8 {
+                push(rng.random(), true, false, false);
+            }
+            // A sponge chain: the whole state carries over.
+            let start: [GlF; W] = rng.random();
+            push(start, true, false, false);
+            push(native.permute(start), false, false, false);
+            let prev = native.permute(native.permute(start));
+            // Merkle rows: the previous digest (two cubic limbs) is the left then right child.
+            let sibling: [GlF; 2 * D] = rng.random();
+            let mut left = [GlF::ZERO; W];
+            left[..2 * D].copy_from_slice(&prev[..2 * D]);
+            left[2 * D..].copy_from_slice(&sibling);
+            push(left, false, true, false);
+            let digest = native.permute(left);
+            let mut right = [GlF::ZERO; W];
+            right[..2 * D].copy_from_slice(&sibling);
+            right[2 * D..].copy_from_slice(&digest[..2 * D]);
+            push(right, false, true, true);
+
+            let (air, trace) = air_and_trace(rows);
+            for (r, expected) in outputs.iter().enumerate() {
+                assert_eq!(&trace_output(&trace, r), expected, "row {r}");
+            }
+            assert_air_satisfies::<GlF, GlEF, _>(&air, &trace);
+
+            // A tampered permutation output is rejected.
+            let mut bad = trace;
+            bad.values[PERM_COLS - 1] += GlF::ONE;
+            assert_air_rejects::<GlF, GlEF, _>(&air, &bad);
+        }
+
+        #[test]
+        fn constraint_degree_is_unchanged_for_shared_role_modes() {
+            let constants = goldilocks_d3_width12_round_constants();
+            let ordinary = goldilocks_d3_width12_default_air();
+            let challenger = Poseidon2CircuitAirGoldilocksD3Width12::new(constants.clone())
+                .with_challenger_role(true);
+            let shared =
+                Poseidon2CircuitAirGoldilocksD3Width12::new(constants).with_shared_role(true);
+            assert_unchanged_constraint_degree::<GlF, GlEF, _>(
+                &ordinary,
+                &challenger,
+                &shared,
+                "GoldilocksD3Width12",
+            );
+        }
+    }
 }

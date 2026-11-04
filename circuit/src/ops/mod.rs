@@ -65,6 +65,7 @@ pub use poseidon2_perm::{
     // Preset configurations
     BabyBearD1Width16,
     GoldilocksD2Width8,
+    GoldilocksD3Width12,
     KoalaBearD1Width16,
     // Prover/AIR (trace access)
     Poseidon2CircuitRow,

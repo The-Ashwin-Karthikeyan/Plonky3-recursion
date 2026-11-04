@@ -38,7 +38,7 @@ pub enum Poseidon2FieldId {
 pub struct Poseidon2Config {
     /// Identifies which prime field this configuration targets.
     field_id: Poseidon2FieldId,
-    /// Extension degree (1 = base field challenges, 2 = quadratic, 4 = quartic).
+    /// Extension degree (1 = base field challenges, 2 = quadratic, 3 = cubic, 4 = quartic).
     d: usize,
     /// Permutation state width in base field elements (e.g. 8, 16, 24).
     width: usize,
@@ -162,6 +162,22 @@ impl Poseidon2Config {
         field_id: Poseidon2FieldId::Goldilocks,
         d: 2,
         width: 8,
+        sbox_degree: 7,
+        sbox_registers: 1,
+        half_full_rounds: 4,
+        challenger: false,
+        shared: false,
+        partial_rounds: 22,
+    };
+
+    /// Goldilocks with cubic extension (D=3), width 12 (matches Poseidon2Goldilocks<12>).
+    ///
+    /// Arity-2 shape with `width_ext = 4`, `rate_ext = capacity_ext = 2`, i.e. a rate and
+    /// digest of 6 base elements.
+    pub const GOLDILOCKS_D3_W12: Self = Self {
+        field_id: Poseidon2FieldId::Goldilocks,
+        d: 3,
+        width: 12,
         sbox_degree: 7,
         sbox_registers: 1,
         half_full_rounds: 4,
@@ -545,6 +561,7 @@ impl Poseidon2Config {
                 },
                 Poseidon2FieldId::Goldilocks => match (self.d, self.width) {
                     (2, 8) => "goldilocks_d2_w8_shared",
+                    (3, 12) => "goldilocks_d3_w12_shared",
                     _ => panic!("unknown Goldilocks Poseidon2 shared config"),
                 },
             };
@@ -563,6 +580,7 @@ impl Poseidon2Config {
                 },
                 Poseidon2FieldId::Goldilocks => match (self.d, self.width) {
                     (2, 8) => "goldilocks_d2_w8_challenger",
+                    (3, 12) => "goldilocks_d3_w12_challenger",
                     _ => panic!("unknown Goldilocks Poseidon2 challenger config"),
                 },
             };
@@ -586,6 +604,7 @@ impl Poseidon2Config {
             Poseidon2FieldId::Goldilocks => match (self.d, self.width) {
                 (2, 8) => "goldilocks_d2_w8",
                 (2, 16) => "goldilocks_d2_w16",
+                (3, 12) => "goldilocks_d3_w12",
                 _ => panic!("unknown Goldilocks Poseidon2 config"),
             },
         }
@@ -605,11 +624,13 @@ impl Poseidon2Config {
             "koala_bear_d4_w32" => Some(Self::KOALA_BEAR_D4_W32),
             "goldilocks_d2_w8" => Some(Self::GOLDILOCKS_D2_W8),
             "goldilocks_d2_w16" => Some(Self::GOLDILOCKS_D2_W16),
+            "goldilocks_d3_w12" => Some(Self::GOLDILOCKS_D3_W12),
             "baby_bear_d4_w16_challenger" => Some(Self::BABY_BEAR_D4_W16.for_challenger()),
             "baby_bear_d4_w24_challenger" => Some(Self::BABY_BEAR_D4_W24.for_challenger()),
             "koala_bear_d4_w16_challenger" => Some(Self::KOALA_BEAR_D4_W16.for_challenger()),
             "koala_bear_d4_w24_challenger" => Some(Self::KOALA_BEAR_D4_W24.for_challenger()),
             "goldilocks_d2_w8_challenger" => Some(Self::GOLDILOCKS_D2_W8.for_challenger()),
+            "goldilocks_d3_w12_challenger" => Some(Self::GOLDILOCKS_D3_W12.for_challenger()),
             "baby_bear_d4_w16_shared" => Some(Self::BABY_BEAR_D4_W16.for_shared_challenger_table()),
             "baby_bear_d4_w24_shared" => Some(Self::BABY_BEAR_D4_W24.for_shared_challenger_table()),
             "koala_bear_d4_w16_shared" => {
@@ -619,6 +640,9 @@ impl Poseidon2Config {
                 Some(Self::KOALA_BEAR_D4_W24.for_shared_challenger_table())
             }
             "goldilocks_d2_w8_shared" => Some(Self::GOLDILOCKS_D2_W8.for_shared_challenger_table()),
+            "goldilocks_d3_w12_shared" => {
+                Some(Self::GOLDILOCKS_D3_W12.for_shared_challenger_table())
+            }
             _ => None,
         }
     }
@@ -895,17 +919,57 @@ mod tests {
             Poseidon2Config::KOALA_BEAR_D4_W32,
             Poseidon2Config::GOLDILOCKS_D2_W8,
             Poseidon2Config::GOLDILOCKS_D2_W16,
+            Poseidon2Config::GOLDILOCKS_D3_W12,
             Poseidon2Config::BABY_BEAR_D4_W16.for_challenger(),
             Poseidon2Config::BABY_BEAR_D4_W24.for_challenger(),
             Poseidon2Config::KOALA_BEAR_D4_W16.for_challenger(),
             Poseidon2Config::KOALA_BEAR_D4_W24.for_challenger(),
             Poseidon2Config::GOLDILOCKS_D2_W8.for_challenger(),
+            Poseidon2Config::GOLDILOCKS_D3_W12.for_challenger(),
+            Poseidon2Config::GOLDILOCKS_D2_W8.for_shared_challenger_table(),
+            Poseidon2Config::GOLDILOCKS_D3_W12.for_shared_challenger_table(),
         ];
         for cfg in configs {
             let name = cfg.variant_name();
             let parsed = Poseidon2Config::from_variant_name(name);
             assert_eq!(parsed, Some(cfg), "roundtrip failed for {name}");
         }
+    }
+
+    #[test]
+    fn goldilocks_d3_w12_geometry() {
+        let cfg = Poseidon2Config::GOLDILOCKS_D3_W12;
+        assert!(cfg.is_goldilocks());
+        assert!(!cfg.is_arity4_shape());
+        assert_eq!(
+            (cfg.d(), cfg.width(), cfg.width_ext()),
+            (3, 12, 4),
+            "four cubic limbs"
+        );
+        assert_eq!((cfg.rate_ext(), cfg.capacity_ext()), (2, 2));
+        assert_eq!(cfg.rate(), 6, "rate and digest are 6 base elements");
+        assert_eq!(
+            (
+                cfg.sbox_degree(),
+                cfg.sbox_registers(),
+                cfg.half_full_rounds(),
+                cfg.partial_rounds()
+            ),
+            (7, 1, 4, 22)
+        );
+        // Binary Merkle rows and sponge rows are both accepted.
+        assert!(cfg.validate_io_counts(5, 2, true).is_ok());
+        assert!(cfg.validate_io_counts(5, 4, false).is_ok());
+        assert!(cfg.validate_io_counts(6, 2, true).is_err());
+        assert_eq!(cfg.variant_name(), "goldilocks_d3_w12");
+        assert_eq!(
+            cfg.for_challenger().variant_name(),
+            "goldilocks_d3_w12_challenger"
+        );
+        assert_eq!(
+            cfg.for_shared_challenger_table().source_configs(),
+            vec![cfg.for_challenger(), cfg]
+        );
     }
 
     #[test]

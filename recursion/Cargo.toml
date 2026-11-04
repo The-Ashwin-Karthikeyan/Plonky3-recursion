@@ -127,5 +127,9 @@ path = "tests/suites/whir_recursion.rs"
 name = "whir_quintic"
 path = "tests/whir_quintic.rs"
 
+[[test]]
+name = "goldilocks_d3_w12"
+path = "tests/goldilocks_d3_w12.rs"
+
 [lints]
 workspace = true

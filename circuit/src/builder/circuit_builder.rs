@@ -545,6 +545,31 @@ where
         self.register_poseidon2_challenger_npo::<Config>(exec);
     }
 
+    /// Enables Poseidon2 for configs with WIDTH=12 (e.g. Goldilocks with cubic limbs).
+    pub fn enable_poseidon2_perm_width_12<Config, P>(
+        &mut self,
+        trace_generator: TraceGeneratorFn<F>,
+        perm: P,
+    ) where
+        Config: Poseidon2Params,
+        F: Field + ExtensionField<Config::BaseField>,
+        P: Permutation<[Config::BaseField; 12]> + Clone + Send + Sync + 'static,
+    {
+        assert!(
+            Config::WIDTH == 12,
+            "enable_poseidon2_perm_width_12 requires WIDTH=12"
+        );
+        let exec = packed_perm_exec::<F, Config::BaseField, P, 12>(
+            Config::D,
+            Config::WIDTH,
+            Config::WIDTH_EXT,
+            perm,
+        );
+        let plugin = Poseidon2CircuitPlugin::new(Config::CONFIG, exec.clone(), trace_generator);
+        self.register_npo(plugin);
+        self.register_poseidon2_challenger_npo::<Config>(exec);
+    }
+
     /// Enables Poseidon2 for the arity-4 compression configs with WIDTH=32.
     pub fn enable_poseidon2_perm_width_32<Config, P>(
         &mut self,
