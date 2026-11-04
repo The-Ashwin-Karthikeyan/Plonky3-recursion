@@ -488,6 +488,19 @@ macro_rules! impl_table_prover_batch_instances_from_base {
                 unsafe { transmute_traces(traces) };
             self.$base::<SC>(config, packing, t)
         }
+
+        fn batch_instance_d3(
+            &self,
+            config: &SC,
+            packing: &TablePacking,
+            traces: &p3_circuit::tables::Traces<
+                p3_field::extension::CubicTrinomialExtensionField<p3_batch_stark::Val<SC>>,
+            >,
+        ) -> Option<BatchTableInstance<SC>> {
+            let t: &p3_circuit::tables::Traces<p3_batch_stark::Val<SC>> =
+                unsafe { transmute_traces(traces) };
+            self.$base::<SC>(config, packing, t)
+        }
     };
 }
 
@@ -724,7 +737,7 @@ where
     /// `#[derive(Deserialize)]` can bypass.
     pub fn validate(&self) -> Result<(), ProofMetadataError> {
         match self.ext_degree {
-            1 | 2 | 4 | 5 | 6 | 8 => {}
+            1 | 2 | 3 | 4 | 5 | 6 | 8 => {}
             d => return Err(ProofMetadataError::UnsupportedExtDegree(d)),
         }
         self.rows.validate()?;
@@ -863,6 +876,9 @@ where
             }
             2 => {
                 Self::from_independently_trusted_builtin_artifact_degree::<2>(config, parts, common)
+            }
+            3 => {
+                Self::from_independently_trusted_builtin_artifact_degree::<3>(config, parts, common)
             }
             4 => {
                 Self::from_independently_trusted_builtin_artifact_degree::<4>(config, parts, common)
@@ -1295,7 +1311,7 @@ pub enum ProofMetadataError {
     BadHornerPackedSteps(usize),
 
     /// `ext_degree` is not one of the supported values.
-    #[error("unsupported extension degree {0} (supported: 1,2,4,5,6,8)")]
+    #[error("unsupported extension degree {0} (supported: 1,2,3,4,5,6,8)")]
     UnsupportedExtDegree(usize),
 
     /// The proof's declared extension degree does not match the verifier's expected trace field.
@@ -1406,8 +1422,8 @@ impl From<ProofMetadataError> for CircuitError {
 /// Errors for the batch STARK table prover.
 #[derive(Debug, Error)]
 pub enum BatchStarkProverError {
-    /// The extension field degree is not one of the supported values (1, 2, 4, 6, 8).
-    #[error("unsupported extension degree: {0} (supported: 1,2,4,5,6,8)")]
+    /// The extension field degree is not one of the supported values (1, 2, 3, 4, 5, 6, 8).
+    #[error("unsupported extension degree: {0} (supported: 1,2,3,4,5,6,8)")]
     UnsupportedDegree(usize),
 
     /// An extension field with degree > 1 was requested but the binomial parameter `W` was not
@@ -1728,7 +1744,7 @@ where
 
 /// Dispatch a runtime extension degree to a `const D` monomorphization.
 ///
-/// The single supported-degree list (1, 2, 4, 5, 6, 8) lives here so the prove and
+/// The single supported-degree list (1, 2, 3, 4, 5, 6, 8) lives here so the prove and
 /// verify entry points cannot drift. `$body` is evaluated with `$d` bound as a
 /// `const usize` for each supported degree; any other degree yields
 /// [`BatchStarkProverError::UnsupportedDegree`].
@@ -1741,6 +1757,10 @@ macro_rules! dispatch_by_ext_degree {
             }
             2 => {
                 const $d: usize = 2;
+                $body
+            }
+            3 => {
+                const $d: usize = 3;
                 $body
             }
             4 => {
@@ -2210,6 +2230,24 @@ where
                     let t: &Traces<BinomialExtensionField<Val<SC>, 2>> =
                         unsafe { transmute_traces(traces) };
                     prover.batch_instance_d2(&self.config, packing, t)
+                }
+                3 => {
+                    // Degree 3 is reinterpreted as the cubic trinomial field only: require
+                    // exactly that type, so another degree-3 field over `Val<SC>` never
+                    // reaches `batch_instance_d3` under the cubic's name.
+                    if EF::DIMENSION != 3
+                        || TypeId::of::<EF>()
+                            != TypeId::of::<
+                                p3_field::extension::CubicTrinomialExtensionField<Val<SC>>,
+                            >()
+                    {
+                        return Err(BatchStarkProverError::RelationMismatch(
+                            "degree-3 traces must use CubicTrinomialExtensionField".into(),
+                        ));
+                    }
+                    let t: &Traces<p3_field::extension::CubicTrinomialExtensionField<Val<SC>>> =
+                        unsafe { transmute_traces(traces) };
+                    prover.batch_instance_d3(&self.config, packing, t)
                 }
                 4 => {
                     let t: &Traces<BinomialExtensionField<Val<SC>, 4>> =

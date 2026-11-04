@@ -12,7 +12,9 @@ use p3_circuit::ops::recompose::{RecomposeTrace, RecomposeTraceKind};
 use p3_circuit::ops::{NonPrimitivePreprocessedMap, NpoTypeId};
 use p3_circuit::tables::Traces;
 use p3_circuit::{CircuitError, PreprocessedColumns};
-use p3_field::extension::{BinomialExtensionField, QuinticTrinomialExtensionField};
+use p3_field::extension::{
+    BinomialExtensionField, CubicTrinomialExtensionField, QuinticTrinomialExtensionField,
+};
 use p3_field::{Algebra, ExtensionField, Field, PrimeCharacteristicRing, PrimeField64};
 use p3_goldilocks::Goldilocks;
 use p3_koala_bear::KoalaBear;
@@ -316,6 +318,11 @@ impl NpoPreprocessor<Goldilocks> for RecomposePreprocessor {
             preprocessed.downcast_mut::<PreprocessedColumns<BinomialExtensionField<F, 2>, 2>>()
         {
             return recompose_preprocess_impl::<F, _, 2>(prep, split);
+        }
+        if let Some(prep) =
+            preprocessed.downcast_mut::<PreprocessedColumns<CubicTrinomialExtensionField<F>, 3>>()
+        {
+            return recompose_preprocess_impl::<F, _, 3>(prep, split);
         }
         if let Some(prep) = preprocessed.downcast_mut::<PreprocessedColumns<F, 1>>() {
             return recompose_preprocess_impl::<F, _, 1>(prep, split);

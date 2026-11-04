@@ -13,7 +13,9 @@ use p3_batch_stark::folder::{
 use p3_batch_stark::{StarkGenericConfig, Val};
 use p3_circuit::ops::NpoTypeId;
 use p3_circuit::tables::Traces;
-use p3_field::extension::{BinomialExtensionField, QuinticTrinomialExtensionField};
+use p3_field::extension::{
+    BinomialExtensionField, CubicTrinomialExtensionField, QuinticTrinomialExtensionField,
+};
 use p3_field::{Algebra, PrimeField};
 use p3_lookup::symbolic::InteractionSymbolicBuilder;
 use p3_matrix::dense::RowMajorMatrix;
@@ -347,7 +349,7 @@ where
 
 #[inline(always)]
 /// Reinterpret a `&Traces<FromEF>` as a `&Traces<ToEF>` to recover a const extension
-/// degree from a runtime one for the const-generic `batch_instance_d{1,2,4,5,6,8}` dispatch.
+/// degree from a runtime one for the const-generic `batch_instance_d{1,2,3,4,5,6,8}` dispatch.
 ///
 /// # Safety
 ///
@@ -470,6 +472,16 @@ where
         _config: &SC,
         _packing: &TablePacking,
         _traces: &Traces<QuinticTrinomialExtensionField<Val<SC>>>,
+    ) -> Option<BatchTableInstance<SC>> {
+        None
+    }
+
+    /// Produce a batched table instance for degree-3 cubic trinomial extension traces.
+    fn batch_instance_d3(
+        &self,
+        _config: &SC,
+        _packing: &TablePacking,
+        _traces: &Traces<CubicTrinomialExtensionField<Val<SC>>>,
     ) -> Option<BatchTableInstance<SC>> {
         None
     }

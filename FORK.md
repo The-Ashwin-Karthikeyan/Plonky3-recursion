@@ -82,3 +82,45 @@ field implementing `CubicTrinomialExtendable` and does not change behaviour for
 existing degrees, apart from rejecting relations that were already unusable (a
 binomial at `D = 5` in the descriptor, the trinomial flag at a degree without a
 trinomial).
+
+### WP2: degree-3 dispatch in circuit-prover
+
+**What changed.**
+
+- `circuit-prover/src/batch_stark_prover.rs`: `D = 3` is accepted by
+  `BatchStarkProof::validate`, by the public
+  `CircuitVerifier::from_independently_trusted_builtin_artifact` (which returned
+  `UnsupportedDegree` for 3) and by `dispatch_by_ext_degree!`, the single degree
+  list behind `prove_all_tables`, the prepared prover and `verify_all_tables`.
+  The `UnsupportedDegree` / `UnsupportedExtDegree` messages list the new degree.
+- The non-primitive dispatch in `prove` gets a `3 =>` arm that reinterprets
+  `Traces<EF>` as `Traces<CubicTrinomialExtensionField<Val>>`. Unlike the other
+  arms it checks the type first: unless `EF` is exactly that field (`TypeId`
+  equality, and `EF::DIMENSION == 3`), it returns `RelationMismatch` before the
+  `unsafe` cast.
+- `circuit-prover/src/common.rs`: `TrustedBuiltinArtifactRelation::try_new`
+  accepts `ext_degree == 3`.
+- `circuit-prover/src/batch_stark_prover/dynamic_air.rs`:
+  `TableProver::batch_instance_d3`, with a default `None` like
+  `batch_instance_d5`; `impl_table_prover_batch_instances_from_base!` implements
+  it for every table prover built from it (Recompose, Statement, Keccak, BLAKE3).
+- `recompose.rs`, `statement.rs`: the Goldilocks preprocessors downcast
+  `PreprocessedColumns<CubicTrinomialExtensionField<Goldilocks>, 3>`. The
+  Poseidon1/2, Keccak and BLAKE3 preprocessors do not yet (Poseidon2 is WP4).
+- Tests: a primitive-only Goldilocks D3 batch proof (Const, Public, ALU with
+  MUL, MUL_ADD and a Horner chain over a non-base constant, over a cubic
+  challenge field and the Goldilocks W8 MMCS of `config::goldilocks()`), proved and
+  verified; the verifier rejects the wrong field, a flipped trinomial flag and a
+  stray `w`. A tampered MUL output coefficient and a tampered public value are
+  both rejected. Also the trusted path (`prepare_circuit`, `CircuitVerifier::verify`,
+  the built-in artifact import at D3) and Recompose with coefficient lookups plus
+  Statement at D3.
+
+**Why.** With the cubic ALU from WP1, this lets circuit-prover prove and verify
+its primitive tables, Recompose and Statement over Goldilocks D3. The Poseidon2
+W12 table (WP4) and the recursion backend (WP5) are still missing, so in-circuit
+verification at D3 is not possible yet.
+
+**Upstreamable.** Yes. Degree 3 joins the supported list for any field
+implementing `CubicTrinomialExtendable`. Behaviour at the existing degrees is
+unchanged, and the new trait method has a default.

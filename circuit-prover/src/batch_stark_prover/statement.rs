@@ -10,7 +10,9 @@ use p3_batch_stark::{StarkGenericConfig, Val};
 use p3_circuit::ops::{NonPrimitivePreprocessedMap, NpoTypeId, StatementTrace};
 use p3_circuit::tables::Traces;
 use p3_circuit::{Circuit, CircuitError, PreprocessedColumns, StatementSchema};
-use p3_field::extension::{BinomialExtensionField, QuinticTrinomialExtensionField};
+use p3_field::extension::{
+    BinomialExtensionField, CubicTrinomialExtensionField, QuinticTrinomialExtensionField,
+};
 use p3_field::{Algebra, ExtensionField, Field, PrimeCharacteristicRing, PrimeField64};
 use p3_goldilocks::Goldilocks;
 use p3_koala_bear::KoalaBear;
@@ -204,6 +206,7 @@ impl_statement_preprocessor!(
     [
         Goldilocks => 1,
         BinomialExtensionField<Goldilocks, 2> => 2,
+        CubicTrinomialExtensionField<Goldilocks> => 3,
     ]
 );
 

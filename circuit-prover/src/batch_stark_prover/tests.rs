@@ -11,8 +11,8 @@ use p3_circuit::ops::poseidon1_perm::{
 };
 use p3_circuit::ops::poseidon2_perm::{GoldilocksD2Width8, Poseidon2PermCallBase};
 use p3_circuit::ops::{
-    KoalaBearD1Width16, NpoTypeId, Op, Poseidon1Config, Poseidon2Config, PrimitiveOpType,
-    generate_poseidon1_trace, generate_poseidon2_trace, generate_recompose_trace,
+    AluOpKind, KoalaBearD1Width16, NpoTypeId, Op, Poseidon1Config, Poseidon2Config,
+    PrimitiveOpType, generate_poseidon1_trace, generate_poseidon2_trace, generate_recompose_trace,
 };
 use p3_circuit::tables::NonPrimitiveTrace;
 use p3_commit::{
@@ -20,14 +20,16 @@ use p3_commit::{
     UnivariateStarkPcs,
 };
 use p3_field::PrimeCharacteristicRing;
-use p3_field::extension::{BinomialExtensionField, QuinticTrinomialExtensionField};
-use p3_fri::{FriParameters, HidingFriPcs};
+use p3_field::extension::{
+    BinomialExtensionField, CubicTrinomialExtensionField, QuinticTrinomialExtensionField,
+};
+use p3_fri::{FriParameters, HidingFriPcs, TwoAdicFriPcs};
 use p3_goldilocks::{Goldilocks, Poseidon2Goldilocks};
 use p3_koala_bear::{KoalaBear, default_koalabear_poseidon1_16, default_koalabear_poseidon2_16};
 use p3_matrix::Matrix;
 use p3_matrix::dense::RowMajorMatrix;
-use p3_merkle_tree::MerkleTreeHidingMmcs;
-use p3_symmetric::{CryptographicHasher, PaddingFreeSponge, Permutation};
+use p3_merkle_tree::{MerkleTreeHidingMmcs, MerkleTreeMmcs};
+use p3_symmetric::{CryptographicHasher, PaddingFreeSponge, Permutation, TruncatedPermutation};
 use p3_test_utils::LiftPermToQuintic;
 use p3_test_utils::corpus::{
     CaseRng, CorpusSpec, derive_family_seed, for_each_case, parse_proof_corpus,
@@ -1868,6 +1870,306 @@ fn test_goldilocks_batch_stark_binomial_ext2() {
     prover
         .verify_all_tables::<BinomialExtensionField<Goldilocks, 2>>(&proof)
         .unwrap();
+}
+
+type GoldilocksExt3 = CubicTrinomialExtensionField<Goldilocks>;
+type GoldilocksW8ValMmcs = MerkleTreeMmcs<
+    Goldilocks,
+    Goldilocks,
+    PaddingFreeSponge<Poseidon2Goldilocks<8>, 8, 4, 4>,
+    TruncatedPermutation<Poseidon2Goldilocks<8>, 2, 4, 8>,
+    2,
+    4,
+>;
+/// `GoldilocksConfig` with the cubic trinomial challenge field instead of the binomial quadratic.
+type GoldilocksCubicConfig = StarkConfig<
+    TwoAdicFriPcs<
+        Goldilocks,
+        p3_dft::Radix2DitParallel<Goldilocks>,
+        GoldilocksW8ValMmcs,
+        ExtensionMmcs<Goldilocks, GoldilocksExt3, GoldilocksW8ValMmcs>,
+    >,
+    GoldilocksExt3,
+    p3_challenger::DuplexChallenger<Goldilocks, Poseidon2Goldilocks<8>, 8, 4>,
+>;
+
+/// The MMCS, FRI parameters and challenger of [`config::goldilocks`], over the cubic challenge.
+fn goldilocks_cubic_config() -> GoldilocksCubicConfig {
+    let mut rng = rand::rngs::Xoshiro256PlusPlus::seed_from_u64(1);
+    let perm = Poseidon2Goldilocks::<8>::new_from_rng_128(&mut rng);
+    let val_mmcs = GoldilocksW8ValMmcs::new(
+        PaddingFreeSponge::new(perm.clone()),
+        TruncatedPermutation::new(perm.clone()),
+        3,
+    );
+    let fri_params = FriParameters::new_benchmark_high_arity(ExtensionMmcs::new(val_mmcs.clone()));
+    let pcs = TwoAdicFriPcs::new(p3_dft::Radix2DitParallel::default(), val_mmcs, fri_params);
+    StarkConfig::new(pcs, p3_challenger::DuplexChallenger::new(perm))
+}
+
+fn gl_ext3(coeffs: [u64; 3]) -> GoldilocksExt3 {
+    GoldilocksExt3::from_basis_coefficients_slice(&coeffs.map(Goldilocks::from_u64)).unwrap()
+}
+
+/// A primitive-only D3 circuit: MUL, MUL_ADD and a three-step Horner chain over a non-base
+/// constant, each bound to a public input. Returns the circuit and its public inputs.
+fn goldilocks_ext3_alu_circuit() -> (p3_circuit::Circuit<GoldilocksExt3>, Vec<GoldilocksExt3>) {
+    let mut builder = CircuitBuilder::<GoldilocksExt3>::new();
+    let x = builder.public_input();
+    let y = builder.public_input();
+    let z = builder.public_input();
+    let p_z = builder.public_input();
+    let p_x = builder.public_input();
+    let expected_mul = builder.public_input();
+    let expected_mul_add = builder.public_input();
+    let expected_horner = builder.public_input();
+    let alpha_val = gl_ext3([5, 3, 9]);
+    let alpha = builder.define_const(alpha_val);
+    let zero = builder.define_const(GoldilocksExt3::ZERO);
+
+    let xy = builder.mul(x, y);
+    builder.connect(xy, expected_mul);
+    let fused = builder.mul_add(x, z, y);
+    builder.connect(fused, expected_mul_add);
+    let h0 = builder.horner_acc_step(zero, alpha, p_z, p_x);
+    let h1 = builder.horner_acc_step(h0, alpha, z, x);
+    let h2 = builder.horner_acc_step(h1, alpha, y, p_x);
+    builder.connect(h2, expected_horner);
+    let circuit = builder.build().unwrap();
+
+    // Every operand has an X^2 coefficient, so each product reduces through X^3 = X + 1.
+    let x_val = gl_ext3([3, Goldilocks::ORDER_U64 - 1, 7]);
+    let y_val = gl_ext3([7, 11, 2]);
+    let z_val = gl_ext3([13, 17, 19]);
+    let p_z_val = gl_ext3([23, 29, 31]);
+    let p_x_val = gl_ext3([37, 41, 43]);
+    let h0_val = p_z_val - p_x_val;
+    let h1_val = h0_val * alpha_val + z_val - x_val;
+    let h2_val = h1_val * alpha_val + y_val - p_x_val;
+    let publics = vec![
+        x_val,
+        y_val,
+        z_val,
+        p_z_val,
+        p_x_val,
+        x_val * y_val,
+        x_val * z_val + y_val,
+        h2_val,
+    ];
+    (circuit, publics)
+}
+
+#[test]
+fn test_goldilocks_batch_stark_cubic_trinomial_ext3() {
+    const D: usize = 3;
+    let (circuit, publics) = goldilocks_ext3_alu_circuit();
+    let run = |publics: &[GoldilocksExt3]| {
+        let mut runner = circuit.runner();
+        runner.set_public_inputs(publics).unwrap();
+        runner.run().unwrap()
+    };
+    let traces = run(&publics);
+    for kind in [AluOpKind::Mul, AluOpKind::MulAdd, AluOpKind::HornerAcc] {
+        assert!(
+            traces.alu_trace.op_kind.contains(&kind),
+            "the D3 ALU trace must contain a {kind:?} row"
+        );
+    }
+
+    let cfg = goldilocks_cubic_config();
+    let (airs_degrees, primitive_columns, non_primitive_columns) =
+        get_airs_and_degrees_with_prep::<GoldilocksCubicConfig, _, D>(
+            &circuit,
+            &TablePacking::default(),
+            &[],
+            &[],
+            ConstraintProfile::Standard,
+        )
+        .unwrap();
+    let (airs, degrees): (Vec<_>, Vec<usize>) = airs_degrees.into_iter().unzip();
+    let prover_data = ProverData::from_airs_and_degrees(&cfg, &airs, &degrees).unwrap();
+    let circuit_prover_data =
+        CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
+    let prover = BatchStarkProver::new(cfg);
+
+    let mut proof = prover
+        .prove_all_tables(&traces, &circuit_prover_data)
+        .unwrap();
+    assert_eq!(proof.ext_degree, D);
+    assert_eq!(proof.w_binomial, None);
+    assert!(
+        proof.alu_quintic_trinomial,
+        "D3 records the cubic trinomial"
+    );
+    prover.verify_all_tables::<GoldilocksExt3>(&proof).unwrap();
+
+    // The verifier-chosen field binds the degree and the reduction.
+    assert!(
+        prover
+            .verify_all_tables::<BinomialExtensionField<Goldilocks, 2>>(&proof)
+            .is_err()
+    );
+    proof.alu_quintic_trinomial = false;
+    assert!(prover.verify_all_tables::<GoldilocksExt3>(&proof).is_err());
+    proof.alu_quintic_trinomial = true;
+    proof.w_binomial = Some(Goldilocks::from_u64(7));
+    assert!(prover.verify_all_tables::<GoldilocksExt3>(&proof).is_err());
+    proof.w_binomial = None;
+    prover.verify_all_tables::<GoldilocksExt3>(&proof).unwrap();
+
+    // A tampered witness (one coefficient of the MUL output) and a tampered public value
+    // must each be rejected.
+    let tamper_mul_out = |traces: &mut Traces<GoldilocksExt3>| {
+        let row = traces
+            .alu_trace
+            .op_kind
+            .iter()
+            .position(|kind| *kind == AluOpKind::Mul)
+            .unwrap();
+        traces.alu_trace.values[row][3] += gl_ext3([0, 0, 1]);
+    };
+    let tamper_public = |traces: &mut Traces<GoldilocksExt3>| {
+        let expected_mul = publics[5];
+        let slot = traces
+            .public_trace
+            .values
+            .iter()
+            .position(|value| *value == expected_mul)
+            .unwrap();
+        traces.public_trace.values[slot] += gl_ext3([0, 1, 0]);
+    };
+    for (tamper, context) in [
+        (
+            &tamper_mul_out as &dyn Fn(&mut Traces<GoldilocksExt3>),
+            "D3 MUL output coefficient 2 changed",
+        ),
+        (&tamper_public, "D3 public value changed"),
+    ] {
+        let mut forged = run(&publics);
+        tamper(&mut forged);
+        let prove_and_verify = || {
+            let proof = prover
+                .prove_all_tables(&forged, &circuit_prover_data)
+                .map_err(AlgebraicProofCheckError::Prove)?;
+            prover
+                .verify_all_tables::<GoldilocksExt3>(&proof)
+                .map_err(AlgebraicProofCheckError::Verify)
+        };
+        #[cfg(debug_assertions)]
+        let result = run_with_strict_debug_oracle(prove_and_verify)
+            .unwrap_or_else(|kind| Err(AlgebraicProofCheckError::DebugPanic(kind)));
+        #[cfg(not(debug_assertions))]
+        let result = prove_and_verify();
+        assert_algebraic_rejection(&result, context);
+    }
+}
+
+/// The trusted path at D3: `prepare_circuit`, `CircuitVerifier::verify`, and the trusted
+/// built-in artifact import, which rebuilds the D3 relation without proving state.
+#[test]
+fn test_goldilocks_cubic_trinomial_ext3_trusted_relation() {
+    const D: usize = 3;
+    let (circuit, publics) = goldilocks_ext3_alu_circuit();
+    let mut runner = circuit.runner();
+    runner.set_public_inputs(&publics).unwrap();
+    let traces = runner.run().unwrap();
+
+    let prepared = BatchStarkProver::new(goldilocks_cubic_config())
+        .prepare_circuit::<GoldilocksExt3, D>(&circuit, &[], &[], ConstraintProfile::Standard)
+        .unwrap();
+    assert_eq!(prepared.relation().ext_degree(), D);
+    let proof = prepared.prove(&traces).unwrap();
+    let verifier = prepared.verifier();
+    verifier.verify(&proof, &[]).unwrap();
+
+    let relation = verifier.relation();
+    assert_eq!(
+        relation.reduction(),
+        crate::air::AluExtMulKind::CubicTrinomial
+    );
+    let parts = crate::TrustedBuiltinArtifactRelation::try_new(
+        relation.table_packing().clone(),
+        *relation.rows(),
+        relation.ext_degree(),
+        relation.reduction(),
+        relation.alu_variant(),
+        relation.constraint_profile(),
+        Vec::new(),
+        relation.statement_layout().schema().clone(),
+        relation.statement_layout().table_instance(),
+        relation.aggregation_statement_layout().cloned(),
+        relation.trace_degree_bits().to_vec(),
+    )
+    .unwrap();
+    let imported = CircuitVerifier::from_independently_trusted_builtin_artifact(
+        verifier.config().clone(),
+        parts,
+        clone_common_data(verifier.common_data()),
+    )
+    .unwrap();
+    drop(verifier);
+    drop(prepared);
+    imported.verify(&proof, &[]).unwrap();
+}
+
+/// Recompose (with coefficient lookups) and Statement at D3: their preprocessors downcast the
+/// cubic columns and their table provers run through `batch_instance_d3`.
+#[test]
+fn test_goldilocks_cubic_trinomial_ext3_recompose_and_statement() {
+    const D: usize = 3;
+    type SC = GoldilocksCubicConfig;
+    let mut builder = CircuitBuilder::<GoldilocksExt3>::new();
+    builder.enable_recompose::<Goldilocks>(generate_recompose_trace::<Goldilocks, GoldilocksExt3>);
+    let base = builder.public_input();
+    let extension = builder.public_input();
+    let schema = builder
+        .set_statement_exports::<Goldilocks>(&[
+            p3_circuit::StatementExport::Base(base),
+            p3_circuit::StatementExport::Extension(extension),
+        ])
+        .unwrap();
+    let circuit = builder.build().unwrap();
+
+    let preprocessors: Vec<Box<dyn NpoPreprocessor<Goldilocks>>> = vec![
+        Box::new(RecomposePreprocessor::new(true)),
+        Box::new(StatementPreprocessor::new(schema.clone())),
+    ];
+    let mut air_builders: Vec<Box<dyn NpoAirBuilder<SC, D>>> = recompose_air_builders(1, true);
+    air_builders.push(Box::new(StatementAirBuilder::<D>::new(schema.clone())));
+    let mut prover = BatchStarkProver::new(goldilocks_cubic_config())
+        .with_table_packing(TablePacking::default().with_npo_min_height(NpoTypeId::statement(), 4));
+    prover.register_recompose_table::<D>(true);
+    prover.register_table_prover(Box::new(StatementProver::<D>::new(schema)));
+    let prepared = prover
+        .prepare_circuit::<GoldilocksExt3, D>(
+            &circuit,
+            &preprocessors,
+            &air_builders,
+            ConstraintProfile::Standard,
+        )
+        .unwrap();
+
+    let base_val = Goldilocks::from_u64(7);
+    let extension_val = gl_ext3([11, 12, 13]);
+    let mut runner = circuit.runner();
+    runner
+        .set_public_inputs(&[GoldilocksExt3::from(base_val), extension_val])
+        .unwrap();
+    let proof = prepared.prove(&runner.run().unwrap()).unwrap();
+    assert_eq!(proof.ext_degree, D);
+    assert!(
+        proof
+            .non_primitives
+            .iter()
+            .any(|entry| entry.op_type == NpoTypeId::recompose_with_coeff_lookups()),
+        "the recompose table must be proved at D3"
+    );
+
+    let expected = [7, 11, 12, 13].map(Goldilocks::from_u64);
+    let verifier = prepared.verifier();
+    verifier.verify(&proof, &expected).unwrap();
+    let wrong = [7, 11, 12, 14].map(Goldilocks::from_u64);
+    assert!(verifier.verify(&proof, &wrong).is_err());
 }
 
 #[test]

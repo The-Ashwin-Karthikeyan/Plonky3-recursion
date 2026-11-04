@@ -359,7 +359,7 @@ impl<F: Copy> TrustedBuiltinArtifactRelation<F> {
     ) -> Result<Self, ProofMetadataError> {
         table_packing.validate()?;
         rows.validate()?;
-        if !matches!(ext_degree, 1 | 2 | 4 | 5 | 6 | 8) {
+        if !matches!(ext_degree, 1 | 2 | 3 | 4 | 5 | 6 | 8) {
             return Err(ProofMetadataError::UnsupportedExtDegree(ext_degree));
         }
         let expected_instances = NUM_PRIMITIVE_TABLES
