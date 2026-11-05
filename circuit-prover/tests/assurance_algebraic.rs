@@ -22,7 +22,9 @@ use p3_circuit_prover::{
     Poseidon1Preprocessor, Poseidon2Preprocessor, TablePacking,
 };
 use p3_field::PrimeCharacteristicRing;
-use p3_field::extension::{BinomialExtensionField, QuinticTrinomialExtensionField};
+use p3_field::extension::{
+    BinomialExtensionField, CubicTrinomialExtensionField, QuinticTrinomialExtensionField,
+};
 use p3_koala_bear::{KoalaBear, default_koalabear_poseidon1_16, default_koalabear_poseidon2_16};
 use p3_symmetric::Permutation;
 use p3_test_utils::LiftPermToQuintic;
@@ -141,6 +143,15 @@ impl TableProver<KoalaBearConfig> for PostStateMutatingProver {
         traces: &Traces<BinomialExtensionField<KoalaBear, 2>>,
     ) -> Option<BatchTableInstance<KoalaBearConfig>> {
         self.inner.batch_instance_d2(config, packing, traces)
+    }
+
+    fn batch_instance_d3(
+        &self,
+        config: &KoalaBearConfig,
+        packing: &TablePacking,
+        traces: &Traces<CubicTrinomialExtensionField<KoalaBear>>,
+    ) -> Option<BatchTableInstance<KoalaBearConfig>> {
+        self.inner.batch_instance_d3(config, packing, traces)
     }
 
     fn batch_instance_d4(

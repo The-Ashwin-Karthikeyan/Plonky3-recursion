@@ -70,7 +70,8 @@ use crate::batch_stark_prover::packing::MAX_SANE_LANES;
 use crate::batch_stark_prover::{
     BABY_BEAR_MODULUS, KOALA_BEAR_MODULUS, Poseidon1Preprocessor, Poseidon2Preprocessor,
     poseidon1_air_builders_d5, poseidon1_table_provers_d5, poseidon2_air_builders,
-    poseidon2_air_builders_d5, poseidon2_table_provers_d5, recompose_air_builders,
+    poseidon2_air_builders_d3, poseidon2_air_builders_d5, poseidon2_table_provers_d3,
+    poseidon2_table_provers_d5, recompose_air_builders,
 };
 use crate::common::{NpoAirBuilder, NpoPreprocessor, get_airs_and_degrees_with_prep};
 use crate::config::{self, BabyBearConfig, GoldilocksConfig, KoalaBearConfig};
@@ -2170,6 +2171,178 @@ fn test_goldilocks_cubic_trinomial_ext3_recompose_and_statement() {
     verifier.verify(&proof, &expected).unwrap();
     let wrong = [7, 11, 12, 14].map(Goldilocks::from_u64);
     assert!(verifier.verify(&proof, &wrong).is_err());
+}
+
+/// Poseidon2 width 12 at D3 through the public D3 factories: a two-row sponge (checked against
+/// `PaddingFreeSponge<_, 12, 6, 6>`) and a 2-to-1 compression (against
+/// `TruncatedPermutation<_, 2, 6, 12>`), proved over `config::goldilocks_d3_w12()` by the
+/// prepared prover (`register_poseidon2_table::<3>`) and by `prove_all_tables`
+/// (`poseidon2_table_provers_d3`), and verified. A forged permutation input is rejected.
+#[test]
+fn test_goldilocks_d3_w12_poseidon2_sponge_and_compression() {
+    use p3_circuit::ops::{GoldilocksD3Width12, Poseidon2PermCall, Poseidon2Trace};
+    use p3_symmetric::PseudoCompressionFunction;
+
+    const D: usize = 3;
+    type SC = config::GoldilocksD3W12Config;
+    let poseidon2 = Poseidon2Config::GOLDILOCKS_D3_W12;
+    let table = NpoTypeId::poseidon2_perm(poseidon2);
+    let perm = p3_goldilocks::default_goldilocks_poseidon2_12();
+    let limbs = |values: &[Goldilocks]| -> Vec<GoldilocksExt3> {
+        values
+            .chunks(D)
+            .map(|c| GoldilocksExt3::from_basis_coefficients_slice(c).unwrap())
+            .collect()
+    };
+
+    let mut builder = CircuitBuilder::<GoldilocksExt3>::new();
+    builder.enable_poseidon2_perm_width_12::<GoldilocksD3Width12, _>(
+        generate_poseidon2_trace::<GoldilocksExt3, GoldilocksD3Width12>,
+        perm.clone(),
+    );
+    // Sponge: 12 base elements in four cubic limbs, absorbed by two chained rows.
+    let sponge_in: Vec<_> = (0..4).map(|_| builder.public_input()).collect();
+    let sponge_out = builder
+        .add_hash_slice(&poseidon2, &sponge_in, true)
+        .unwrap();
+    // Compression: two 6-element digests in one fresh row, truncated to the rate.
+    let compress_in: Vec<_> = (0..4).map(|_| builder.public_input()).collect();
+    let (_, compress_out) = builder
+        .add_poseidon2_perm(&Poseidon2PermCall {
+            config: poseidon2,
+            new_start: true,
+            merkle_path: false,
+            mmcs_bit: None,
+            mmcs_bit2: None,
+            inputs: compress_in.iter().copied().map(Some).collect(),
+            out_ctl: vec![true; poseidon2.rate_ext()],
+            return_all_outputs: false,
+            absorb_len: 0,
+        })
+        .unwrap();
+    let outputs: Vec<_> = sponge_out
+        .into_iter()
+        .chain(
+            compress_out[..poseidon2.rate_ext()]
+                .iter()
+                .map(|o| o.unwrap()),
+        )
+        .collect();
+    for out in outputs {
+        let expected = builder.public_input();
+        builder.connect(out, expected);
+    }
+    let circuit = builder.build().unwrap();
+
+    let sponge_values: [Goldilocks; 12] =
+        core::array::from_fn(|i| Goldilocks::from_u64(100 + i as u64));
+    let left: [Goldilocks; 6] = core::array::from_fn(|i| Goldilocks::from_u64(200 + i as u64));
+    let right: [Goldilocks; 6] = core::array::from_fn(|i| Goldilocks::from_u64(300 + i as u64));
+    let sponge_digest = PaddingFreeSponge::<Poseidon2Goldilocks<12>, 12, 6, 6>::new(perm.clone())
+        .hash_iter(sponge_values);
+    let compressed = TruncatedPermutation::<Poseidon2Goldilocks<12>, 2, 6, 12>::new(perm)
+        .compress([left, right]);
+    let mut public_inputs = limbs(&sponge_values);
+    public_inputs.extend(limbs(&left));
+    public_inputs.extend(limbs(&right));
+    public_inputs.extend(limbs(&sponge_digest));
+    public_inputs.extend(limbs(&compressed));
+    let mut runner = circuit.runner();
+    runner.set_public_inputs(&public_inputs).unwrap();
+    let traces = runner.run().unwrap();
+    let rows = &traces
+        .non_primitive_trace::<Poseidon2Trace<Goldilocks>>(&table)
+        .unwrap()
+        .operations;
+    assert_eq!(rows.len(), 3);
+    assert!(rows[0].new_start && !rows[1].new_start && rows[2].new_start);
+
+    let preprocessors: Vec<Box<dyn NpoPreprocessor<Goldilocks>>> =
+        vec![Box::new(Poseidon2Preprocessor)];
+    let air_builders = poseidon2_air_builders_d3::<SC>();
+
+    // The prepared prover, with the table registered through `RegisterPoseidon2ForExt<3>`.
+    let mut prover = BatchStarkProver::new(config::goldilocks_d3_w12());
+    prover.register_poseidon2_table::<D>(poseidon2);
+    let prepared = prover
+        .prepare_circuit::<GoldilocksExt3, D>(
+            &circuit,
+            &preprocessors,
+            &air_builders,
+            ConstraintProfile::Standard,
+        )
+        .unwrap();
+    let proof = prepared.prove(&traces).unwrap();
+    assert_eq!(proof.ext_degree, D);
+    assert!(proof.alu_quintic_trinomial);
+    assert!(
+        proof.non_primitives.iter().any(|e| e.op_type == table),
+        "the W12 table must be proved at D3"
+    );
+    prepared.verifier().verify(&proof, &[]).unwrap();
+
+    // `prove_all_tables`, with the table prover from `poseidon2_table_provers_d3`.
+    let cfg = config::goldilocks_d3_w12();
+    let (airs_degrees, primitive_columns, non_primitive_columns) =
+        get_airs_and_degrees_with_prep::<SC, _, D>(
+            &circuit,
+            &TablePacking::default(),
+            &preprocessors,
+            &air_builders,
+            ConstraintProfile::Standard,
+        )
+        .unwrap();
+    let (airs, degrees): (Vec<_>, Vec<usize>) = airs_degrees.into_iter().unzip();
+    let prover_data = ProverData::from_airs_and_degrees(&cfg, &airs, &degrees).unwrap();
+    let circuit_prover_data =
+        CircuitProverData::new(prover_data, primitive_columns, non_primitive_columns);
+    let mut prover = BatchStarkProver::new(cfg);
+    for p in poseidon2_table_provers_d3(poseidon2) {
+        prover.register_table_prover(p);
+    }
+    let proof = prover
+        .prove_all_tables(&traces, &circuit_prover_data)
+        .unwrap();
+    assert!(proof.non_primitives.iter().any(|e| e.op_type == table));
+    prover
+        .verify_all_tables::<GoldilocksExt3>(&proof)
+        .expect("honest D3/W12 Poseidon2 proof must verify");
+
+    // A prover that writes a different first sponge input into its Poseidon2 row: the row is
+    // a valid permutation of the forged input, but no longer matches the circuit's witness.
+    let mut forged_trace = traces
+        .non_primitive_trace::<Poseidon2Trace<Goldilocks>>(&table)
+        .unwrap()
+        .clone();
+    forged_trace.operations[0].input_values[0] += Goldilocks::ONE;
+    let mut forged = runner_traces(&circuit, &public_inputs);
+    forged
+        .non_primitive_traces
+        .insert(table, Box::new(forged_trace));
+    let prove_and_verify = || {
+        let proof = prover
+            .prove_all_tables(&forged, &circuit_prover_data)
+            .map_err(AlgebraicProofCheckError::Prove)?;
+        prover
+            .verify_all_tables::<GoldilocksExt3>(&proof)
+            .map_err(AlgebraicProofCheckError::Verify)
+    };
+    #[cfg(debug_assertions)]
+    let result = run_with_strict_debug_oracle(prove_and_verify)
+        .unwrap_or_else(|kind| Err(AlgebraicProofCheckError::DebugPanic(kind)));
+    #[cfg(not(debug_assertions))]
+    let result = prove_and_verify();
+    assert_algebraic_rejection(&result, "forged Poseidon2 W12 input at D3");
+}
+
+/// Run `circuit` on `public_inputs`.
+fn runner_traces<EF: Field>(
+    circuit: &p3_circuit::Circuit<EF>,
+    public_inputs: &[EF],
+) -> p3_circuit::tables::Traces<EF> {
+    let mut runner = circuit.runner();
+    runner.set_public_inputs(public_inputs).unwrap();
+    runner.run().unwrap()
 }
 
 #[test]

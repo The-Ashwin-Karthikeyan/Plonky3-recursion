@@ -28,7 +28,7 @@ use p3_circuit::ops::{
 use p3_circuit::tables::Traces;
 use p3_circuit::{CircuitError, PreprocessedColumns, StatementError};
 use p3_commit::Pcs;
-use p3_field::extension::{BinomialExtensionField, BinomiallyExtendable};
+use p3_field::extension::{BinomialExtensionField, BinomiallyExtendable, CubicTrinomialExtendable};
 use p3_field::{
     Algebra, BasedVectorSpace, ExtensionField, Field, PrimeCharacteristicRing, PrimeField,
     PrimeField64,
@@ -83,8 +83,8 @@ pub use poseidon1::{
 };
 pub use poseidon2::{
     Poseidon2AirBuilder, Poseidon2AirBuilderForConfig, Poseidon2AirWrapperInner,
-    Poseidon2Preprocessor, Poseidon2Prover, Poseidon2ProverD2, Poseidon2SharedPreprocessor,
-    poseidon2_preprocessor, poseidon2_verifier_air_from_config,
+    Poseidon2Preprocessor, Poseidon2Prover, Poseidon2ProverD2, Poseidon2ProverD3,
+    Poseidon2SharedPreprocessor, poseidon2_preprocessor, poseidon2_verifier_air_from_config,
 };
 pub use recompose::{RecomposeAirBuilder, RecomposePreprocessor, RecomposeProver};
 pub use statement::{StatementAirBuilder, StatementPreprocessor, StatementProver};
@@ -1171,16 +1171,19 @@ fn supported_poseidon2(config: Poseidon2Config) -> bool {
         Poseidon2Config::KOALA_BEAR_D4_W32,
         Poseidon2Config::GOLDILOCKS_D2_W8,
         Poseidon2Config::GOLDILOCKS_D2_W16,
+        Poseidon2Config::GOLDILOCKS_D3_W12,
         Poseidon2Config::BABY_BEAR_D4_W16.for_challenger(),
         Poseidon2Config::BABY_BEAR_D4_W24.for_challenger(),
         Poseidon2Config::KOALA_BEAR_D4_W16.for_challenger(),
         Poseidon2Config::KOALA_BEAR_D4_W24.for_challenger(),
         Poseidon2Config::GOLDILOCKS_D2_W8.for_challenger(),
+        Poseidon2Config::GOLDILOCKS_D3_W12.for_challenger(),
         Poseidon2Config::BABY_BEAR_D4_W16.for_shared_challenger_table(),
         Poseidon2Config::BABY_BEAR_D4_W24.for_shared_challenger_table(),
         Poseidon2Config::KOALA_BEAR_D4_W16.for_shared_challenger_table(),
         Poseidon2Config::KOALA_BEAR_D4_W24.for_shared_challenger_table(),
         Poseidon2Config::GOLDILOCKS_D2_W8.for_shared_challenger_table(),
+        Poseidon2Config::GOLDILOCKS_D3_W12.for_shared_challenger_table(),
     ]
     .contains(&config)
 }
@@ -1657,6 +1660,21 @@ where
     }
 }
 
+impl<SC> RegisterPoseidon2ForExt<3, SC> for ()
+where
+    SC: StarkGenericConfig + 'static + Send + Sync,
+    Val<SC>: StarkField + CubicTrinomialExtendable,
+    SymbolicExpressionExt<Val<SC>, SC::Challenge>:
+        Algebra<SymbolicExpression<Val<SC>>> + Algebra<SC::Challenge>,
+{
+    fn register_poseidon2(prover: &mut BatchStarkProver<SC>, config: Poseidon2Config) {
+        prover.register_table_prover(Box::new(Poseidon2ProverD3::new(
+            config,
+            ConstraintProfile::Standard,
+        )));
+    }
+}
+
 impl<SC> RegisterPoseidon2ForExt<4, SC> for ()
 where
     SC: StarkGenericConfig + 'static + Send + Sync,
@@ -1830,7 +1848,8 @@ where
         self
     }
 
-    /// Register the non-primitive Poseidon2 table prover for extension degree `D` (`2` or `4`).
+    /// Register the non-primitive Poseidon2 table prover for extension degree `D` (`2`, `3`,
+    /// `4` or `5`).
     pub fn register_poseidon2_table<const D: usize>(&mut self, config: Poseidon2Config)
     where
         SC: Send + Sync,
@@ -3236,6 +3255,31 @@ where
         Algebra<SymbolicExpression<Val<SC>>> + Algebra<SC::Challenge>,
 {
     vec![Box::new(Poseidon2AirBuilder::<2>)]
+}
+
+/// Create Poseidon2 table provers for `D = 3` (Goldilocks with the cubic trinomial extension).
+pub fn poseidon2_table_provers_d3<SC>(config: Poseidon2Config) -> Vec<Box<dyn TableProver<SC>>>
+where
+    SC: StarkGenericConfig + 'static + Send + Sync,
+    Val<SC>: StarkField + CubicTrinomialExtendable,
+    SymbolicExpressionExt<Val<SC>, SC::Challenge>:
+        Algebra<SymbolicExpression<Val<SC>>> + Algebra<SC::Challenge>,
+{
+    vec![Box::new(Poseidon2ProverD3::new(
+        config,
+        ConstraintProfile::Standard,
+    ))]
+}
+
+/// Poseidon2 AIR builders for `D = 3` (Goldilocks with the cubic trinomial extension).
+pub fn poseidon2_air_builders_d3<SC>() -> Vec<Box<dyn NpoAirBuilder<SC, 3>>>
+where
+    SC: StarkGenericConfig + 'static + Send + Sync,
+    Val<SC>: StarkField,
+    SymbolicExpressionExt<Val<SC>, SC::Challenge>:
+        Algebra<SymbolicExpression<Val<SC>>> + Algebra<SC::Challenge>,
+{
+    vec![Box::new(Poseidon2AirBuilder::<3>)]
 }
 
 /// Poseidon2 AIR builders for D=4 (e.g. BabyBear, KoalaBear).

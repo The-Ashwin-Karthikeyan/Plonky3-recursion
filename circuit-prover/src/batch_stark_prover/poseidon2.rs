@@ -2,25 +2,26 @@ use alloc::boxed::Box;
 use alloc::string::String;
 use alloc::vec::Vec;
 use alloc::{format, vec};
-use core::any::Any;
+use core::any::{Any, TypeId};
 use core::mem::transmute;
 
 #[cfg(debug_assertions)]
 use p3_air::DebugConstraintBuilder;
-use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
+use p3_air::{Air, AirBuilder, BaseAir, ExtensionBuilder, WindowAccess};
 use p3_baby_bear::{BabyBear, GenericPoseidon2LinearLayersBabyBear};
 use p3_batch_stark::folder::{
     ProverConstraintFolderWithLookups, VerifierConstraintFolderWithLookups,
 };
 use p3_batch_stark::{StarkGenericConfig, Val};
 use p3_circuit::ops::{
-    GoldilocksD2Width8, NonPrimitivePreprocessedMap, NpoTypeId, Poseidon2CircuitRow,
-    Poseidon2Config, Poseidon2Params, Poseidon2Trace,
+    GoldilocksD2Width8, GoldilocksD3Width12, NonPrimitivePreprocessedMap, NpoTypeId,
+    Poseidon2CircuitRow, Poseidon2Config, Poseidon2Params, Poseidon2Trace,
 };
 use p3_circuit::tables::Traces;
 use p3_circuit::{CircuitError, PreprocessedColumns};
 use p3_field::extension::{
-    BinomialExtensionField, BinomiallyExtendable, QuinticTrinomialExtensionField,
+    BinomialExtensionField, BinomiallyExtendable, CubicTrinomialExtendable,
+    CubicTrinomialExtensionField, QuinticTrinomialExtensionField,
 };
 use p3_field::{
     Algebra, BasedVectorSpace, ExtensionField, Field, PrimeCharacteristicRing, PrimeField,
@@ -45,7 +46,9 @@ use crate::batch_stark_prover::{
     poseidon_d1_witness_bus_dim, poseidon_preprocess_for_prover,
 };
 use crate::common::{CircuitTableAir, NpoAirBuilder, NpoPreprocessor};
-use crate::config::{BabyBearConfig, GoldilocksConfig, KoalaBearConfig, StarkField};
+use crate::config::{
+    BabyBearConfig, GoldilocksConfig, GoldilocksD3W12Config, KoalaBearConfig, StarkField,
+};
 use crate::constraint_profile::ConstraintProfile;
 
 pub enum Poseidon2AirWrapperInner {
@@ -63,6 +66,7 @@ pub enum Poseidon2AirWrapperInner {
     KoalaBearD4Width32(Box<Poseidon2CircuitAirKoalaBearD4Width32>),
     GoldilocksD2Width8(Box<Poseidon2CircuitAirGoldilocksD2Width8>),
     GoldilocksD2Width16(Box<Poseidon2CircuitAirGoldilocksD2Width16>),
+    GoldilocksD3Width12(Box<Poseidon2CircuitAirGoldilocksD3Width12>),
 }
 
 #[cfg(test)]
@@ -83,11 +87,14 @@ mod width_tests {
             Poseidon2Config::KOALA_BEAR_D4_W32,
             Poseidon2Config::GOLDILOCKS_D2_W8,
             Poseidon2Config::GOLDILOCKS_D2_W16,
+            Poseidon2Config::GOLDILOCKS_D3_W12,
             Poseidon2Config::BABY_BEAR_D4_W16.for_challenger(),
             Poseidon2Config::BABY_BEAR_D4_W24.for_challenger(),
             Poseidon2Config::KOALA_BEAR_D4_W16.for_challenger(),
             Poseidon2Config::KOALA_BEAR_D4_W24.for_challenger(),
             Poseidon2Config::GOLDILOCKS_D2_W8.for_challenger(),
+            Poseidon2Config::GOLDILOCKS_D3_W12.for_challenger(),
+            Poseidon2Config::GOLDILOCKS_D3_W12.for_shared_challenger_table(),
         ];
         for config in configs {
             let prover = Poseidon2Prover::new(config, ConstraintProfile::Standard);
@@ -139,6 +146,7 @@ mod width_tests {
             Poseidon2Config::KOALA_BEAR_D4_W16,
             Poseidon2Config::KOALA_BEAR_D4_W24,
             Poseidon2Config::GOLDILOCKS_D2_W8,
+            Poseidon2Config::GOLDILOCKS_D3_W12,
         ];
         for ordinary in shared {
             let combined = ordinary.for_shared_challenger_table();
@@ -153,6 +161,34 @@ mod width_tests {
                 ordinary_prover.preprocessed_width_from_config()
             );
         }
+    }
+
+    /// The D3/W12 AIR evaluates over Goldilocks with the cubic trinomial challenge field.
+    #[test]
+    fn d3_air_evaluates_over_the_cubic_challenge_field() {
+        let air = Poseidon2Prover::air_wrapper_for_config(Poseidon2Config::GOLDILOCKS_D3_W12);
+        let layout = p3_air::AirLayout::from_air::<Goldilocks>(&air);
+        let mut builder = InteractionSymbolicBuilder::<
+            Goldilocks,
+            CubicTrinomialExtensionField<Goldilocks>,
+        >::new(layout);
+        Air::eval(&air, &mut builder);
+    }
+
+    /// The D3 cast guard (dimension and `TypeId`) refuses any other challenge field before the
+    /// builder is reinterpreted.
+    #[test]
+    #[should_panic(
+        expected = "the D3/W12 Poseidon2 AIR requires Goldilocks and its cubic trinomial extension"
+    )]
+    fn d3_air_rejects_another_challenge_field() {
+        let air = Poseidon2Prover::air_wrapper_for_config(Poseidon2Config::GOLDILOCKS_D3_W12);
+        let layout = p3_air::AirLayout::from_air::<Goldilocks>(&air);
+        let mut builder = InteractionSymbolicBuilder::<
+            Goldilocks,
+            BinomialExtensionField<Goldilocks, 2>,
+        >::new(layout);
+        Air::eval(&air, &mut builder);
     }
 
     #[test]
@@ -374,6 +410,9 @@ impl Poseidon2AirWrapperInner {
             Self::GoldilocksD2Width16(air) => {
                 generate!(air, Goldilocks, goldilocks_d2_width16_round_constants())
             }
+            Self::GoldilocksD3Width12(air) => {
+                generate!(air, Goldilocks, goldilocks_d3_width12_round_constants())
+            }
         }
     }
 
@@ -424,6 +463,9 @@ impl Poseidon2AirWrapperInner {
             Self::GoldilocksD2Width16(air) => {
                 Self::GoldilocksD2Width16(Box::new((*air).with_challenger_role(challenger)))
             }
+            Self::GoldilocksD3Width12(air) => {
+                Self::GoldilocksD3Width12(Box::new((*air).with_challenger_role(challenger)))
+            }
         }
     }
 
@@ -471,6 +513,9 @@ impl Poseidon2AirWrapperInner {
             Self::GoldilocksD2Width16(air) => {
                 Self::GoldilocksD2Width16(Box::new(air.with_shared_role(shared)))
             }
+            Self::GoldilocksD3Width12(air) => {
+                Self::GoldilocksD3Width12(Box::new(air.with_shared_role(shared)))
+            }
         }
     }
 
@@ -490,6 +535,7 @@ impl Poseidon2AirWrapperInner {
             Self::KoalaBearD4Width32(air) => air.width(),
             Self::GoldilocksD2Width8(air) => air.width(),
             Self::GoldilocksD2Width16(air) => air.width(),
+            Self::GoldilocksD3Width12(air) => air.width(),
         }
     }
 
@@ -525,6 +571,9 @@ impl Poseidon2AirWrapperInner {
             Self::GoldilocksD2Width16(air) => {
                 BaseAir::<Goldilocks>::preprocessed_width(air.as_ref())
             }
+            Self::GoldilocksD3Width12(air) => {
+                BaseAir::<Goldilocks>::preprocessed_width(air.as_ref())
+            }
         }
     }
 }
@@ -546,6 +595,7 @@ impl Clone for Poseidon2AirWrapperInner {
             Self::KoalaBearD4Width32(air) => Self::KoalaBearD4Width32(air.clone()),
             Self::GoldilocksD2Width8(air) => Self::GoldilocksD2Width8(air.clone()),
             Self::GoldilocksD2Width16(air) => Self::GoldilocksD2Width16(air.clone()),
+            Self::GoldilocksD3Width12(air) => Self::GoldilocksD3Width12(air.clone()),
         }
     }
 }
@@ -573,6 +623,33 @@ impl<SC: StarkGenericConfig> Clone for Poseidon2AirWrapper<SC> {
     }
 }
 
+/// Panics unless `F` is Goldilocks and `EF` is `CubicTrinomialExtensionField<Goldilocks>`
+/// (checked by dimension and by `TypeId`).
+///
+/// Guards every `GoldilocksD3Width12` arm that reinterprets data typed over `(F, EF)` as data
+/// typed over `(Goldilocks, CubicTrinomialExtensionField<Goldilocks>)`, so that each such cast
+/// only renames identical types.
+fn assert_goldilocks_d3_fields<F: Field, EF: ExtensionField<F>>() {
+    assert!(
+        TypeId::of::<F>() == TypeId::of::<Goldilocks>()
+            && <EF as BasedVectorSpace<F>>::DIMENSION == 3
+            && TypeId::of::<EF>() == TypeId::of::<CubicTrinomialExtensionField<Goldilocks>>(),
+        "the D3/W12 Poseidon2 AIR requires Goldilocks and its cubic trinomial extension"
+    );
+}
+
+/// [`assert_goldilocks_d3_fields`] on a builder's base and challenge fields.
+fn assert_goldilocks_d3_builder<AB: ExtensionBuilder>(_builder: &AB) {
+    assert_goldilocks_d3_fields::<AB::F, AB::EF>();
+}
+
+/// [`assert_goldilocks_d3_fields`] on a symbolic builder's base and challenge fields.
+fn assert_goldilocks_d3_symbolic<F: Field, EF: ExtensionField<F>>(
+    _builder: &InteractionSymbolicBuilder<F, EF>,
+) {
+    assert_goldilocks_d3_fields::<F, EF>();
+}
+
 macro_rules! call_eval_variant {
     ($Params:ty, $Config:ty, $F:ty, $LL:ty, $AB:ty, $WITNESS_EXT:expr;
      $air:expr, $b:expr, $l:expr, $n:expr, $p:expr) => {
@@ -597,7 +674,7 @@ macro_rules! call_eval_variant {
 
 macro_rules! eval_folder_inner {
     ($inner:expr, $builder:expr, $local:expr, $next:expr, $prep:expr;
-     bb=$bb_ty:ty, kb=$kb_ty:ty, gl=$gl_ty:ty) => {
+     bb=$bb_ty:ty, kb=$kb_ty:ty, gl=$gl_ty:ty, gl3=$gl3_ty:ty) => {
         match $inner {
             Poseidon2AirWrapperInner::BabyBearD1Width16Bus1(air) => unsafe {
                 let b: &mut $bb_ty = transmute::<_, &mut $bb_ty>($builder);
@@ -733,6 +810,28 @@ macro_rules! eval_folder_inner {
                     { <GoldilocksD2Width16 as Poseidon2Params>::D };
                     air.as_ref(), b, l, n, p);
             },
+            Poseidon2AirWrapperInner::GoldilocksD3Width12(air) => {
+                // SAFETY: the folder is reinterpreted as the folder of `GoldilocksD3W12Config`
+                // (not the D2 `GoldilocksConfig`, whose challenge field differs). The check makes
+                // the base field Goldilocks and the challenge field its cubic trinomial
+                // extension; every field of the folder is typed by those two fields only (`Val`,
+                // `PackedVal`, `Challenge`, `PackedChallenge`), so the cast renames identical
+                // types. Beyond that, like every other arm here, the cast is layout-safe only
+                // while the Poseidon2 AIR emits base-field constraints: `eval_unchecked` reaches
+                // the folder only through `AirBuilder` and never touches its extension-constraint
+                // parts. Re-check this cast if the AIR ever emits extension constraints.
+                assert_goldilocks_d3_builder(&*$builder);
+                unsafe {
+                    let b: &mut $gl3_ty = transmute::<_, &mut $gl3_ty>($builder);
+                    let l: &[<$gl3_ty as AirBuilder>::Var] = transmute($local);
+                    let n: &[<$gl3_ty as AirBuilder>::Var] = transmute($next);
+                    let p: &[<$gl3_ty as AirBuilder>::Var] = transmute($prep);
+                    call_eval_variant!(GoldilocksD3Width12, GoldilocksD3W12Config, Goldilocks,
+                        GenericPoseidon2LinearLayersGoldilocks, $gl3_ty,
+                        { <GoldilocksD3Width12 as Poseidon2Params>::D };
+                        air.as_ref(), b, l, n, p);
+                }
+            }
         }
     };
 }
@@ -850,6 +949,20 @@ macro_rules! eval_symbolic_inner {
                 > = core::mem::transmute($builder);
                 Air::eval(air.as_ref(), b);
             },
+            Poseidon2AirWrapperInner::GoldilocksD3Width12(air) => {
+                // SAFETY: with the fields checked (dimension and `TypeId`), the cast is to the
+                // builder's own type. It is also layout-safe only while the Poseidon2 AIR emits
+                // base-field constraints, as for the other arms: the builder's extension
+                // constraints are never touched.
+                assert_goldilocks_d3_symbolic(&*$builder);
+                unsafe {
+                    let b: &mut InteractionSymbolicBuilder<
+                        Goldilocks,
+                        CubicTrinomialExtensionField<Goldilocks>,
+                    > = core::mem::transmute($builder);
+                    Air::eval(air.as_ref(), b);
+                }
+            }
         }
     };
 }
@@ -935,6 +1048,18 @@ macro_rules! eval_verifier_inner {
                     { <GoldilocksD2Width16 as Poseidon2Params>::D };
                     air.as_ref(), $builder, $local, $next, $prep);
             },
+            Poseidon2AirWrapperInner::GoldilocksD3Width12(air) => {
+                // SAFETY: `eval_unchecked` requires the builder's field to be the AIR's
+                // (Goldilocks); the builder itself is not cast. The Poseidon2 AIR emits
+                // base-field constraints only.
+                assert_goldilocks_d3_builder(&*$builder);
+                unsafe {
+                    call_eval_variant!(GoldilocksD3Width12, GoldilocksD3W12Config, Goldilocks,
+                        GenericPoseidon2LinearLayersGoldilocks, $ab,
+                        { <GoldilocksD3Width12 as Poseidon2Params>::D };
+                        air.as_ref(), $builder, $local, $next, $prep);
+                }
+            }
         }
     };
 }
@@ -1009,6 +1134,14 @@ macro_rules! preprocessed_trace_inner {
                 })
             }
             Poseidon2AirWrapperInner::GoldilocksD2Width16(air) => {
+                let p = BaseAir::<Goldilocks>::preprocessed_trace(air.as_ref())?;
+                Some(unsafe {
+                    transmute::<RowMajorMatrix<Goldilocks>, RowMajorMatrix<Val<$SC>>>(p)
+                })
+            }
+            Poseidon2AirWrapperInner::GoldilocksD3Width12(air) => {
+                // SAFETY: a base-field matrix; the check makes the cast a rename.
+                assert_eq!(TypeId::of::<Val<$SC>>(), TypeId::of::<Goldilocks>());
                 let p = BaseAir::<Goldilocks>::preprocessed_trace(air.as_ref())?;
                 Some(unsafe {
                     transmute::<RowMajorMatrix<Goldilocks>, RowMajorMatrix<Val<$SC>>>(p)
@@ -1171,7 +1304,8 @@ where
             &self.inner, builder, local_slice, next_slice, next_preprocessed_slice;
             bb=ProverConstraintFolder<'a, BabyBearConfig>,
             kb=ProverConstraintFolder<'a, KoalaBearConfig>,
-            gl=ProverConstraintFolder<'a, GoldilocksConfig>
+            gl=ProverConstraintFolder<'a, GoldilocksConfig>,
+            gl3=ProverConstraintFolder<'a, GoldilocksD3W12Config>
         );
     }
 }
@@ -1192,7 +1326,8 @@ where
             &self.inner, builder, local_slice, next_slice, next_preprocessed_slice;
             bb=ProverConstraintFolderWithLookups<'a, BabyBearConfig>,
             kb=ProverConstraintFolderWithLookups<'a, KoalaBearConfig>,
-            gl=ProverConstraintFolderWithLookups<'a, GoldilocksConfig>
+            gl=ProverConstraintFolderWithLookups<'a, GoldilocksConfig>,
+            gl3=ProverConstraintFolderWithLookups<'a, GoldilocksD3W12Config>
         );
     }
 }
@@ -1307,8 +1442,11 @@ impl Poseidon2Prover {
             Poseidon2Config::GOLDILOCKS_D2_W16 => Poseidon2AirWrapperInner::GoldilocksD2Width16(
                 Box::new(GoldilocksD2Width16::default_air()),
             ),
-            // `Poseidon2Config` fields are private; only the seven public assoc
-            // consts above can be constructed, so this is unreachable.
+            Poseidon2Config::GOLDILOCKS_D3_W12 => Poseidon2AirWrapperInner::GoldilocksD3Width12(
+                Box::new(goldilocks_d3_width12_default_air()),
+            ),
+            // `Poseidon2Config` fields are private; only the public assoc consts
+            // above can be constructed, so this is unreachable.
             _ => unreachable!("unsupported Poseidon2Config"),
         };
         inner
@@ -1434,6 +1572,16 @@ impl Poseidon2Prover {
                     min_height,
                 )),
             ),
+            Poseidon2Config::GOLDILOCKS_D3_W12 => {
+                // SAFETY: base-field preprocessed values; the check makes the cast a rename.
+                assert_eq!(TypeId::of::<F>(), TypeId::of::<Goldilocks>());
+                Poseidon2AirWrapperInner::GoldilocksD3Width12(Box::new(
+                    goldilocks_d3_width12_default_air_with_preprocessed(
+                        unsafe { transmute::<Vec<F>, Vec<Goldilocks>>(preprocessed) },
+                        min_height,
+                    ),
+                ))
+            }
             _ => unreachable!("unsupported Poseidon2Config"),
         };
         Some(
@@ -1502,6 +1650,9 @@ impl Poseidon2Prover {
             Poseidon2Config::GOLDILOCKS_D2_W16 => {
                 Poseidon2CircuitAirGoldilocksD2Width16::preprocessed_width()
             }
+            Poseidon2Config::GOLDILOCKS_D3_W12 => {
+                Poseidon2CircuitAirGoldilocksD3Width12::preprocessed_width()
+            }
             _ => panic!("unsupported Poseidon2Config"),
         }
     }
@@ -1532,6 +1683,9 @@ impl Poseidon2Prover {
             }
             Poseidon2Config::GOLDILOCKS_D2_W16 => {
                 Poseidon2CircuitAirGoldilocksD2Width16::main_width()
+            }
+            Poseidon2Config::GOLDILOCKS_D3_W12 => {
+                Poseidon2CircuitAirGoldilocksD3Width12::main_width()
             }
             _ => panic!("unsupported Poseidon2Config"),
         }
@@ -2027,6 +2181,32 @@ impl Poseidon2Prover {
                     matrix,
                 )
             }
+            Poseidon2Config::GOLDILOCKS_D3_W12 => {
+                // SAFETY: the rows and the trace are over the base field; the check makes both
+                // casts below renames.
+                assert_eq!(TypeId::of::<Val<SC>>(), TypeId::of::<Goldilocks>());
+                let constants = goldilocks_d3_width12_round_constants();
+                let preprocessed =
+                    extract_preprocessed_from_operations_with_role::<4, 2, Goldilocks, Val<SC>>(
+                        &padded_ops[..rows],
+                        witness_ctl_scale,
+                        cfg.d(),
+                        cfg.is_challenger(),
+                        cfg.is_shared(),
+                    );
+                let air =
+                    goldilocks_d3_width12_default_air_with_preprocessed(preprocessed, min_height);
+                let ops: Vec<Poseidon2CircuitRow<Goldilocks>> = unsafe { transmute(padded_ops) };
+                let matrix_f = air.generate_trace_rows(&ops, &constants, 0);
+                let matrix: RowMajorMatrix<Val<SC>> = unsafe { transmute(matrix_f) };
+                (
+                    Poseidon2AirWrapper {
+                        inner: Poseidon2AirWrapperInner::GoldilocksD3Width12(Box::new(air)),
+                        _phantom: core::marker::PhantomData::<SC>,
+                    },
+                    matrix,
+                )
+            }
             _ => unreachable!("unsupported Poseidon2Config"),
         };
 
@@ -2316,6 +2496,153 @@ where
     }
 }
 
+/// Poseidon2 table prover for degree-3 circuits (Goldilocks with the cubic trinomial extension).
+///
+/// Like [`Poseidon2ProverD2`], but its traces arrive through
+/// [`TableProver::batch_instance_d3`] and it needs no binomial extension.
+pub struct Poseidon2ProverD3(pub(crate) Poseidon2Prover);
+
+impl Poseidon2ProverD3 {
+    pub const fn new(
+        config: Poseidon2Config,
+        profile: crate::constraint_profile::ConstraintProfile,
+    ) -> Self {
+        Self(Poseidon2Prover::new(config, profile))
+    }
+}
+
+impl<SC> TableProver<SC> for Poseidon2ProverD3
+where
+    SC: StarkGenericConfig + 'static + Send + Sync,
+    Val<SC>: StarkField + CubicTrinomialExtendable,
+    SymbolicExpressionExt<Val<SC>, SC::Challenge>:
+        Algebra<SymbolicExpression<Val<SC>>> + Algebra<SC::Challenge>,
+{
+    fn op_type(&self) -> NpoTypeId {
+        self.0.poseidon2_op_type()
+    }
+
+    fn source_op_types(&self) -> Vec<NpoTypeId> {
+        if self.0.config.is_shared() {
+            self.0
+                .config
+                .source_configs()
+                .into_iter()
+                .map(NpoTypeId::poseidon2_perm)
+                .collect()
+        } else {
+            vec![self.0.poseidon2_op_type()]
+        }
+    }
+
+    fn batch_instance_with_committed_preprocessed(
+        &self,
+        _config: &SC,
+        packing: &TablePacking,
+        traces: &[(&NpoTypeId, &dyn Any)],
+        committed: &[Val<SC>],
+        circuit_extension_degree: u32,
+    ) -> Option<BatchTableInstance<SC>> {
+        if circuit_extension_degree != 3 {
+            return None;
+        }
+        self.0.batch_instance_from_committed::<SC>(
+            packing,
+            traces,
+            committed,
+            circuit_extension_degree,
+        )
+    }
+
+    fn batch_instance_d1(
+        &self,
+        _config: &SC,
+        _packing: &TablePacking,
+        _traces: &Traces<Val<SC>>,
+    ) -> Option<BatchTableInstance<SC>> {
+        None
+    }
+
+    fn batch_instance_d2(
+        &self,
+        _config: &SC,
+        _packing: &TablePacking,
+        _traces: &Traces<BinomialExtensionField<Val<SC>, 2>>,
+    ) -> Option<BatchTableInstance<SC>> {
+        None
+    }
+
+    fn batch_instance_d3(
+        &self,
+        config: &SC,
+        packing: &TablePacking,
+        traces: &Traces<CubicTrinomialExtensionField<Val<SC>>>,
+    ) -> Option<BatchTableInstance<SC>> {
+        self.0
+            .batch_instance_from_traces::<SC, CubicTrinomialExtensionField<Val<SC>>>(
+                config, packing, traces,
+            )
+    }
+
+    fn batch_instance_d4(
+        &self,
+        _config: &SC,
+        _packing: &TablePacking,
+        _traces: &Traces<BinomialExtensionField<Val<SC>, 4>>,
+    ) -> Option<BatchTableInstance<SC>> {
+        None
+    }
+
+    fn batch_instance_d6(
+        &self,
+        _config: &SC,
+        _packing: &TablePacking,
+        _traces: &Traces<BinomialExtensionField<Val<SC>, 6>>,
+    ) -> Option<BatchTableInstance<SC>> {
+        None
+    }
+
+    fn batch_instance_d8(
+        &self,
+        _config: &SC,
+        _packing: &TablePacking,
+        _traces: &Traces<BinomialExtensionField<Val<SC>, 8>>,
+    ) -> Option<BatchTableInstance<SC>> {
+        None
+    }
+
+    fn batch_air_from_table_entry(
+        &self,
+        _config: &SC,
+        _degree: usize,
+        circuit_extension_degree: u32,
+        _table_entry: &NonPrimitiveTableEntry<SC>,
+    ) -> Result<DynamicAirEntry<SC>, String> {
+        self.0
+            .wrapper_from_config_with_preprocessed(Vec::new(), 1, circuit_extension_degree)
+            .ok_or_else(|| {
+                format!(
+                    "unsupported witness bus dimension {} for Poseidon2 config {:?}",
+                    circuit_extension_degree, self.0.config
+                )
+            })
+    }
+
+    fn air_with_committed_preprocessed(
+        &self,
+        committed_prep: Vec<Val<SC>>,
+        min_height: usize,
+        _lanes: usize,
+        circuit_extension_degree: u32,
+    ) -> Option<DynamicAirEntry<SC>> {
+        self.0.wrapper_from_config_with_preprocessed(
+            committed_prep,
+            min_height,
+            circuit_extension_degree,
+        )
+    }
+}
+
 /// Shared helper implementing Poseidon2-specific preprocessing on generic preprocessed columns.
 fn poseidon2_preprocess_for_prover<F, ExtF, const D: usize>(
     preprocessed: &PreprocessedColumns<ExtF, D>,
@@ -2480,6 +2807,15 @@ impl NpoPreprocessor<Goldilocks> for Poseidon2Preprocessor {
                 2,
             >(prep);
         }
+        if let Some(prep) = preprocessed
+            .downcast_mut::<PreprocessedColumns<CubicTrinomialExtensionField<Goldilocks>, 3>>()
+        {
+            return poseidon2_preprocess_for_prover::<
+                Goldilocks,
+                CubicTrinomialExtensionField<Goldilocks>,
+                3,
+            >(prep);
+        }
         Ok(NonPrimitivePreprocessedMap::new())
     }
 }
@@ -2531,12 +2867,16 @@ impl NpoPreprocessor<Goldilocks> for Poseidon2SharedPreprocessor {
         if preprocessed.is::<PreprocessedColumns<BinomialExtensionField<Goldilocks, 2>, 2>>() {
             return shared_preprocess::<Goldilocks, 2>(circuit, preprocessed, &self.configs);
         }
+        if preprocessed.is::<PreprocessedColumns<CubicTrinomialExtensionField<Goldilocks>, 3>>() {
+            return shared_preprocess::<Goldilocks, 3>(circuit, preprocessed, &self.configs);
+        }
         Ok(NonPrimitivePreprocessedMap::new())
     }
 }
 
 /// Returns `Some(config)` when this Poseidon2 variant is supported for batch AIR building at
-/// extension degree `D` (2 = Goldilocks, 4 = BabyBear / KoalaBear, 5 = KoalaBear quintic).
+/// extension degree `D` (2 = Goldilocks, 3 = Goldilocks cubic, 4 = BabyBear / KoalaBear,
+/// 5 = KoalaBear quintic).
 ///
 /// For `D = 5` only D=1 (base-field) configs are valid: the quintic challenger always operates
 /// in the base field.
@@ -2547,6 +2887,10 @@ pub(crate) fn poseidon2_config_for_air_builder<const D: usize>(
     match D {
         2 => match shape {
             Poseidon2Config::GOLDILOCKS_D2_W8 | Poseidon2Config::GOLDILOCKS_D2_W16 => Some(config),
+            _ => None,
+        },
+        3 => match shape {
+            Poseidon2Config::GOLDILOCKS_D3_W12 => Some(config),
             _ => None,
         },
         4 => match shape {
@@ -2578,7 +2922,7 @@ pub(crate) fn poseidon2_air_try_build<SC, const D: usize>(
 ) -> Option<(CircuitTableAir<SC, D>, usize)>
 where
     SC: StarkGenericConfig + 'static + Send + Sync,
-    Val<SC>: StarkField + BinomiallyExtendable<D>,
+    Val<SC>: StarkField,
     SymbolicExpressionExt<Val<SC>, SC::Challenge>:
         Algebra<SymbolicExpression<Val<SC>>> + Algebra<SC::Challenge>,
 {
@@ -2622,6 +2966,29 @@ where
         constraint_profile: ConstraintProfile,
     ) -> Option<(CircuitTableAir<SC, 2>, usize)> {
         poseidon2_air_try_build::<SC, 2>(op_type, prep_base, min_height, constraint_profile)
+    }
+}
+
+impl<SC> NpoAirBuilder<SC, 3> for Poseidon2AirBuilder<3>
+where
+    SC: StarkGenericConfig + 'static + Send + Sync,
+    Val<SC>: StarkField,
+    SymbolicExpressionExt<Val<SC>, SC::Challenge>:
+        Algebra<SymbolicExpression<Val<SC>>> + Algebra<SC::Challenge>,
+{
+    fn trusted_rows_are_padded_height(&self) -> bool {
+        true
+    }
+
+    fn try_build(
+        &self,
+        op_type: &NpoTypeId,
+        prep_base: &[Val<SC>],
+        min_height: usize,
+        _lanes: usize,
+        constraint_profile: ConstraintProfile,
+    ) -> Option<(CircuitTableAir<SC, 3>, usize)> {
+        poseidon2_air_try_build::<SC, 3>(op_type, prep_base, min_height, constraint_profile)
     }
 }
 
@@ -2736,6 +3103,30 @@ where
     ) -> Option<(CircuitTableAir<SC, 2>, usize)> {
         self.matches_op_type(op_type).then_some(())?;
         poseidon2_air_try_build::<SC, 2>(op_type, prep_base, min_height, constraint_profile)
+    }
+}
+
+impl<SC> NpoAirBuilder<SC, 3> for Poseidon2AirBuilderForConfig<3>
+where
+    SC: StarkGenericConfig + 'static + Send + Sync,
+    Val<SC>: StarkField,
+    SymbolicExpressionExt<Val<SC>, SC::Challenge>:
+        Algebra<SymbolicExpression<Val<SC>>> + Algebra<SC::Challenge>,
+{
+    fn trusted_rows_are_padded_height(&self) -> bool {
+        true
+    }
+
+    fn try_build(
+        &self,
+        op_type: &NpoTypeId,
+        prep_base: &[Val<SC>],
+        min_height: usize,
+        _lanes: usize,
+        constraint_profile: ConstraintProfile,
+    ) -> Option<(CircuitTableAir<SC, 3>, usize)> {
+        self.matches_op_type(op_type).then_some(())?;
+        poseidon2_air_try_build::<SC, 3>(op_type, prep_base, min_height, constraint_profile)
     }
 }
 
@@ -3107,6 +3498,12 @@ mod committed_materialization_tests {
             Poseidon2Config::GOLDILOCKS_D2_W8.for_shared_challenger_table(),
         ] {
             check_shape::<GoldilocksConfig>(config, 2);
+        }
+        for config in [
+            Poseidon2Config::GOLDILOCKS_D3_W12,
+            Poseidon2Config::GOLDILOCKS_D3_W12.for_shared_challenger_table(),
+        ] {
+            check_shape::<GoldilocksD3W12Config>(config, 3);
         }
     }
 }

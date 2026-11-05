@@ -15,10 +15,10 @@ use p3_baby_bear::{BabyBear, Poseidon2BabyBear, default_babybear_poseidon2_16};
 use p3_challenger::DuplexChallenger;
 use p3_commit::ExtensionMmcs;
 use p3_dft::Radix2DitParallel;
-use p3_field::extension::BinomialExtensionField;
+use p3_field::extension::{BinomialExtensionField, CubicTrinomialExtensionField};
 use p3_field::{Field, PrimeCharacteristicRing, PrimeField64, TwoAdicField};
 use p3_fri::{FriParameters, TwoAdicFriPcs};
-use p3_goldilocks::{Goldilocks, Poseidon2Goldilocks};
+use p3_goldilocks::{Goldilocks, Poseidon2Goldilocks, default_goldilocks_poseidon2_12};
 use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear, default_koalabear_poseidon2_16};
 use p3_merkle_tree::MerkleTreeMmcs;
 use p3_symmetric::{CryptographicPermutation, PaddingFreeSponge, TruncatedPermutation};
@@ -210,6 +210,42 @@ pub fn goldilocks() -> GoldilocksConfig {
     build_poseidon2_stark_config(perm.clone(), perm)
 }
 
+/// Creates a Goldilocks configuration with the cubic trinomial challenge field and
+/// Poseidon2 width 12.
+///
+/// The hashing matches the `GOLDILOCKS_D3_W12` circuit permutation: p3-goldilocks' reference
+/// permutation `default_goldilocks_poseidon2_12()`, a binary MMCS with cap height 0, and a
+/// duplex challenger.
+///
+/// # Parameters
+/// - **Hash permutation width**: 12
+/// - **Compression permutation width**: 12
+/// - **Rate**: 6
+/// - **Output size**: 6 (a 6-element digest)
+/// - **Challenge field**: `CubicTrinomialExtensionField<Goldilocks>` (`X^3 = X + 1`)
+/// - **FRI**: the benchmark high-arity parameters of the other factories
+///
+/// # Examples
+///
+/// ```rust
+/// use p3_circuit_prover::{BatchStarkProver, config};
+/// let config = config::goldilocks_d3_w12();
+/// let prover = BatchStarkProver::new(config);
+/// ```
+#[inline]
+pub fn goldilocks_d3_w12() -> GoldilocksD3W12Config {
+    let perm = default_goldilocks_poseidon2_12();
+    let val_mmcs = GoldilocksD3W12ValMmcs::new(
+        PaddingFreeSponge::new(perm.clone()),
+        TruncatedPermutation::new(perm.clone()),
+        0,
+    );
+    let challenge_mmcs = ExtensionMmcs::new(val_mmcs.clone());
+    let fri_params = FriParameters::new_benchmark_high_arity(challenge_mmcs);
+    let pcs = TwoAdicFriPcs::new(Radix2DitParallel::default(), val_mmcs, fri_params);
+    StarkConfig::new(pcs, DuplexChallenger::new(perm))
+}
+
 /// Type alias for BabyBear STARK configuration.
 pub type BabyBearConfig =
     Config<BabyBear, Poseidon2BabyBear<16>, Poseidon2BabyBear<16>, 16, 16, 8, 8, 8, 4>;
@@ -221,6 +257,29 @@ pub type KoalaBearConfig =
 /// Type alias for Goldilocks STARK configuration.
 pub type GoldilocksConfig =
     Config<Goldilocks, Poseidon2Goldilocks<8>, Poseidon2Goldilocks<8>, 8, 8, 4, 4, 4, 2>;
+
+/// Binary Merkle MMCS of [`GoldilocksD3W12Config`]: `PaddingFreeSponge<_, 12, 6, 6>` leaves and
+/// `TruncatedPermutation<_, 2, 6, 12>` nodes.
+pub type GoldilocksD3W12ValMmcs = MerkleTreeMmcs<
+    <Goldilocks as Field>::Packing,
+    <Goldilocks as Field>::Packing,
+    PaddingFreeSponge<Poseidon2Goldilocks<12>, 12, 6, 6>,
+    TruncatedPermutation<Poseidon2Goldilocks<12>, COMPRESS_ARITY, 6, 12>,
+    2,
+    6,
+>;
+
+/// Type alias for the Goldilocks cubic-extension, Poseidon2 width-12 STARK configuration.
+pub type GoldilocksD3W12Config = StarkConfig<
+    TwoAdicFriPcs<
+        Goldilocks,
+        Radix2DitParallel<Goldilocks>,
+        GoldilocksD3W12ValMmcs,
+        ExtensionMmcs<Goldilocks, CubicTrinomialExtensionField<Goldilocks>, GoldilocksD3W12ValMmcs>,
+    >,
+    CubicTrinomialExtensionField<Goldilocks>,
+    DuplexChallenger<Goldilocks, Poseidon2Goldilocks<12>, 12, 6>,
+>;
 
 /// Trait bounds for STARK-compatible fields.
 pub trait StarkField: Field + PrimeCharacteristicRing + TwoAdicField + PrimeField64 {}
@@ -236,5 +295,6 @@ mod tests {
         let _bb: BabyBearConfig = baby_bear();
         let _kb: KoalaBearConfig = koala_bear();
         let _gl: GoldilocksConfig = goldilocks();
+        let _gl3: GoldilocksD3W12Config = goldilocks_d3_w12();
     }
 }

@@ -766,7 +766,9 @@ mod tests {
         NonPrimitiveTableEntry, TableProver,
     };
     use p3_circuit_prover::{AirVariant, RowCounts, TablePacking};
-    use p3_field::extension::{BinomialExtensionField, QuinticTrinomialExtensionField};
+    use p3_field::extension::{
+        BinomialExtensionField, CubicTrinomialExtensionField, QuinticTrinomialExtensionField,
+    };
     use p3_field::{Algebra, Field, PrimeCharacteristicRing};
     use p3_lookup::logup::LogUpGadget;
     use p3_uni_stark::{StarkGenericConfig, SymbolicExpression, SymbolicExpressionExt, Val};
@@ -1194,6 +1196,15 @@ mod tests {
             _config: &SC,
             _packing: &TablePacking,
             _traces: &Traces<QuinticTrinomialExtensionField<Val<SC>>>,
+        ) -> Option<BatchTableInstance<SC>> {
+            panic!("manifest reconstruction test must not build proving instances")
+        }
+
+        fn batch_instance_d3(
+            &self,
+            _config: &SC,
+            _packing: &TablePacking,
+            _traces: &Traces<CubicTrinomialExtensionField<Val<SC>>>,
         ) -> Option<BatchTableInstance<SC>> {
             panic!("manifest reconstruction test must not build proving instances")
         }

@@ -24,7 +24,9 @@ use p3_circuit_prover::common::{
     BuiltNpoTable, CircuitTableAir, NpoAirBuilder, NpoPreprocessor, NpoRelation,
 };
 use p3_circuit_prover::{AirVariant, ConstraintProfile, config};
-use p3_field::extension::{BinomialExtensionField, QuinticTrinomialExtensionField};
+use p3_field::extension::{
+    BinomialExtensionField, CubicTrinomialExtensionField, QuinticTrinomialExtensionField,
+};
 use p3_field::{Algebra, BasedVectorSpace, PrimeCharacteristicRing};
 use p3_lookup::symbolic::InteractionSymbolicBuilder;
 use p3_matrix::dense::RowMajorMatrix;
@@ -756,6 +758,15 @@ impl TableProver<SC> for ForgedStatementProver {
         traces: &Traces<BinomialExtensionField<BabyBear, 2>>,
     ) -> Option<BatchTableInstance<SC>> {
         self.0.batch_instance_d2(config, packing, traces)
+    }
+
+    fn batch_instance_d3(
+        &self,
+        config: &SC,
+        packing: &TablePacking,
+        traces: &Traces<CubicTrinomialExtensionField<BabyBear>>,
+    ) -> Option<BatchTableInstance<SC>> {
+        self.0.batch_instance_d3(config, packing, traces)
     }
 
     fn batch_instance_d4(

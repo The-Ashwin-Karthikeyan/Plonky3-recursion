@@ -170,3 +170,73 @@ dispatch (WP2) and the Poseidon2 prover integration (WP4).
 
 **Upstreamable.** Yes. It adds one configuration and leaves existing configurations, names and
 serialized keys unchanged.
+
+### WP4: Poseidon2 width-12 prover integration at D3
+
+**What changed.**
+
+- `circuit-prover/src/batch_stark_prover/poseidon2.rs`:
+  - a `GoldilocksD3Width12` AIR variant with every dispatch arm (trace generation, roles,
+    widths, `Clone`, the prover, symbolic and verifier evaluation, preprocessed trace), built
+    with `goldilocks_d3_width12_default_air[_with_preprocessed]`. `air_wrapper_for_config`
+    and the width lookups handle `GOLDILOCKS_D3_W12`, its challenger table and its shared
+    challenger table, so none of them reaches the `unreachable!`/`panic!` fallback.
+    Preprocessing uses `extract_preprocessed_from_operations_with_role::<4, 2, ..>` with
+    witness scale 3 and Poseidon degree 3, as the D2/W8 shape does with 2.
+  - `Poseidon2ProverD3`, the copy of `Poseidon2ProverD2` for degree-3 circuits. It overrides
+    `batch_instance_d3` (the trait default is `None`, which would silently drop the table),
+    accepts the committed path only at degree 3, and needs `CubicTrinomialExtendable` rather
+    than a binomial bound.
+  - The D3 downcasts in `Poseidon2Preprocessor` and `Poseidon2SharedPreprocessor`, a `3 =>`
+    arm in `poseidon2_config_for_air_builder`, `NpoAirBuilder<SC, 3>` for
+    `Poseidon2AirBuilder<3>` and `Poseidon2AirBuilderForConfig<3>`, and no
+    `BinomiallyExtendable` bound on `poseidon2_air_try_build`.
+  - Casts. The D3 evaluation arms reinterpret the folder as the folder of the new
+    `GoldilocksD3W12Config` (not the D2 `GoldilocksConfig`) and the symbolic builder as
+    `InteractionSymbolicBuilder<Goldilocks, CubicTrinomialExtensionField<Goldilocks>>`. Each
+    first asserts that the builder's base field is Goldilocks and its challenge field is the
+    cubic trinomial extension (dimension 3 and `TypeId`), and panics otherwise. Every folder
+    field is a function of those two fields only, so after the check the cast renames
+    identical types. As for the other variants, the casts are layout-safe only while the
+    Poseidon2 AIR emits base-field constraints: it reaches the folder only through
+    `AirBuilder`, so the extension-constraint parts are never touched. Each site says so. The
+    preprocessed-trace, preprocessed-AIR and trace-materialization casts are over the base
+    field and check `Val<SC> == Goldilocks` (`TypeId`).
+- `circuit-prover/src/batch_stark_prover.rs`: the three D3 configs in `supported_poseidon2`,
+  `RegisterPoseidon2ForExt<3>` (registers `Poseidon2ProverD3`), and
+  `poseidon2_table_provers_d3` / `poseidon2_air_builders_d3`.
+  `poseidon2_air_builders_for_configs::<_, 3>` works as is.
+- `circuit-prover/src/config.rs`: `goldilocks_d3_w12()` and `GoldilocksD3W12Config`:
+  `default_goldilocks_poseidon2_12()`, `PaddingFreeSponge<_, 12, 6, 6>`,
+  `TruncatedPermutation<_, 2, 6, 12>`, a binary MMCS with cap height 0,
+  `DuplexChallenger<_, _, 12, 6>` and the cubic challenge field (lrup's native shape), with
+  the benchmark high-arity FRI parameters of the other factories.
+- `batch_instance_d3` forwarded by the test wrappers that forward `batch_instance_d5`
+  (`recursion/src/prepared/input.rs`, `circuit-prover/tests/assurance_algebraic.rs`,
+  `circuit-prover/tests/trusted_statement.rs`).
+- Tests:
+  - the Poseidon2 width and shared-shape tests and the committed-materialization test cover
+    the D3 configs (plain and shared); the D3 AIR evaluates symbolically over the cubic
+    challenge field, and the cast guard rejects the binomial quadratic one;
+  - `circuit-prover`: a two-row sponge and a 2-to-1 compression, checked against
+    `PaddingFreeSponge<_, 12, 6, 6>` and `TruncatedPermutation<_, 2, 6, 12>`, proved over
+    `goldilocks_d3_w12()` through the public D3 factories (`register_poseidon2_table::<3>`
+    with the prepared prover, `poseidon2_table_provers_d3` with `prove_all_tables`) and
+    verified; a forged permutation input in the trace is rejected;
+  - `recursion/tests/goldilocks_d3_w12.rs` proves at D3 with `BatchStarkProver` and verifies:
+    the known-answer permutation, two-row leaf sponges and Merkle rows in both directions
+    (plus a mixed-height injection); the challenger table next to the ordinary table; and
+    everything in the shared challenger table. Each table is materialized both from the
+    committed preprocessing and through `batch_instance_d3` alone (the committed path
+    declined), and the proof must contain it, so a D3 prover without `batch_instance_d3`
+    fails these tests;
+  - negatives: a forged permutation output (ordinary, challenger and shared tables, on both
+    materialization paths) and a forged Merkle sibling written into the trace. In release
+    builds each proof is produced and the verifier rejects it.
+
+**Why.** With WP2 and WP3, this lets circuit-prover prove and verify circuits that use the
+W12 permutation over `CubicTrinomialExtensionField<Goldilocks>`. In-circuit verification of
+D3 proofs needs the recursion backend (WP5).
+
+**Upstreamable.** Yes. It adds one table variant, prover and config, and leaves the existing
+configurations unchanged.
