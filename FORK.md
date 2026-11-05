@@ -283,3 +283,49 @@ verification at `D = 3`. The built-in suite registry and its D3 suite are WP6.
 
 **Upstreamable.** Yes. Degree 3 joins the supported batch degrees for any field implementing
 `CubicTrinomialExtendable`; the existing degrees are unchanged.
+
+### WP9: D3 end-to-end gate (and WP6 test config)
+
+**What changed.** Tests only; no library code.
+
+- `recursion/tests/common/goldilocks_d3_config.rs` (new, shared by the D3 test targets through
+  `#[path]`): the custom `D3RecursionConfig: FriRecursionConfig` over `GoldilocksD3W12Config`,
+  moved out of `goldilocks_d3_recursion.rs` and parameterised by `D3FriParams` (log blowup,
+  query count, query PoW bits, maximum log arity). Everything else is fixed to lrup's native
+  shape: reference W12 permutation, `PaddingFreeSponge<_, 12, 6, 6>`,
+  `TruncatedPermutation<_, 2, 6, 12>`, cap height 0, `DuplexChallenger<_, _, 12, 6>`,
+  `log_final_poly_len` 0, no commit or batch PoW, no lookup or out-of-domain grinding.
+  - `D3FriParams::lrup_inner_params()`: lrup's inner config (log blowup 1, 256 queries, 22-bit
+    query PoW, max log arity 3).
+  - `D3FriParams::recursion_layer_params()`: a 128-bit recursion-layer config (log blowup 2, 157
+    queries, 22-bit query PoW, max log arity 3).
+  - `D3FriParams::test_params()`: cheap parameters in the same shape (8 queries, 4-bit PoW).
+  - Shared helpers: the D3 backend, `prove_layer_with_stats` (prove a verifier circuit at
+    `D = 3` and verify it natively, with timings) and `layer_input` (the next-layer input of a
+    layer proof). Restoring the FRI query paths in `set_fri_private_data` now returns an error
+    instead of panicking, so a tampered proof is refused cleanly.
+- `recursion/tests/goldilocks_d3_recursion.rs` uses the shared config (unchanged behaviour).
+- `recursion/tests/goldilocks_d3_e2e.rs` (new test target `goldilocks_d3_e2e`):
+  - The inner proof is a native batch proof of three toy AIRs with mixed heights (2^3, 2^5,
+    2^7): a preprocessed AIR with a public value, an AIR with a degree-3 constraint (two
+    quotient chunks), and an AIR receiving both on two global buses.
+  - Layer 1 verifies it in-circuit (`verify_batch_circuit`) and proves that circuit at `D = 3`.
+    Layer 2 verifies the layer-1 proof in-circuit (the D3 backend's
+    `build_next_layer_circuit`) and proves that circuit at `D = 3`. Both layer proofs verify
+    natively.
+  - Negatives, each also rejected by the native verifier: a changed opened value and a bad query
+    PoW witness (circuit execution fails); a changed Merkle sibling, input batch and commit
+    phase (circuit execution fails); a proof of a trace that violates the degree-3 constraint,
+    with honest FRI (in release builds; the native verifier fails the out-of-domain check of that
+    AIR, the query paths restore, and the circuit fails execution on a connection); a layer-1
+    proof with a changed opened value in any table (its paths do not restore, and with the honest
+    paths the layer-2 circuit fails execution).
+  - An ignored test, `two_layers_at_lrup_parameters`, runs the inner proof at
+    `lrup_inner_params()` and both layers at `recursion_layer_params()`, printing each layer's
+    table heights, times and peak memory.
+
+**Why.** It checks the whole D3 path end to end, two proved layers deep, in lrup's config shape,
+and records the sizes later recursion work plans with. The built-in D3 suite (persisted
+verifying keys) is still to come.
+
+**Upstreamable.** The tests could be, together with WP1-WP5.

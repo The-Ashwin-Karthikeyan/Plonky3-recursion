@@ -135,5 +135,9 @@ path = "tests/goldilocks_d3_w12.rs"
 name = "goldilocks_d3_recursion"
 path = "tests/goldilocks_d3_recursion.rs"
 
+[[test]]
+name = "goldilocks_d3_e2e"
+path = "tests/goldilocks_d3_e2e.rs"
+
 [lints]
 workspace = true

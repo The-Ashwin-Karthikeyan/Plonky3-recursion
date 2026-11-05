@@ -14,246 +14,35 @@
 //!   unbalanced global lookup each make the verification circuit fail to execute.
 //! - The D3 backend (`FriRecursionBackendForExt<3, ..>`) captures and validates the prepared input
 //!   contract of that circuit proof and builds its verifier circuit, which runs. The second layer
-//!   is not proved here.
+//!   is proved in `goldilocks_d3_e2e.rs`.
+//!
+//! The recursion config is shared with `goldilocks_d3_e2e.rs` (`common/goldilocks_d3_config.rs`).
 
-use std::sync::Arc;
+#[path = "common/goldilocks_d3_config.rs"]
+mod goldilocks_d3_config;
 
+use goldilocks_d3_config::{
+    Commitment, D, D3FriParams, D3RecursionConfig, DIGEST, EF, F, InputProof, OpeningProof, PERM,
+    RATE, WIDTH, backend, layer_input, prove_layer,
+};
 use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
 use p3_batch_stark::{
     BatchProof, CommonData, ProverData, StarkInstance, prove_batch, verify_batch,
 };
-use p3_circuit::ops::{
-    GoldilocksD3Width12, NpoTypeId, Poseidon2Trace, generate_poseidon2_trace,
-    generate_recompose_trace,
-};
-use p3_circuit::{Circuit, CircuitBuilder, CircuitError, CircuitRunner, NonPrimitiveOpId};
-use p3_circuit_prover::config::{GoldilocksD3W12Config, GoldilocksD3W12ValMmcs};
-use p3_circuit_prover::{BatchStarkProof, BatchStarkProver, ConstraintProfile, TablePacking};
-use p3_commit::{ExtensionMmcs, Pcs};
-use p3_dft::Radix2DitParallel;
+use p3_circuit::ops::{NpoTypeId, Poseidon2Trace};
+use p3_circuit::{Circuit, CircuitBuilder, CircuitError, NonPrimitiveOpId};
+use p3_circuit_prover::BatchStarkProof;
 use p3_field::PrimeCharacteristicRing;
-use p3_field::extension::CubicTrinomialExtensionField;
-use p3_fri::{FriParameters, TwoAdicFriPcs};
-use p3_goldilocks::{Goldilocks, Poseidon2Goldilocks, default_goldilocks_poseidon2_12};
 use p3_lookup::logup::LogUpGadget;
 use p3_lookup::{Count, InteractionBuilder};
 use p3_matrix::dense::RowMajorMatrix;
-use p3_recursion::pcs::{
-    FriProofTargets, FriQueryPaths, InputProofTargets, MerkleCapTargets, RecExtensionValMmcs,
-    RecValMmcs, Witness, restore_fri_query_paths, set_fri_mmcs_private_data,
-};
-use p3_recursion::traits::RecursivePcs;
+use p3_recursion::pcs::{FriQueryPaths, set_fri_mmcs_private_data};
 use p3_recursion::{
-    BatchOnly, BatchStarkVerifierInputsBuilder, FriRecursionBackend, FriRecursionBackendForExt,
-    FriRecursionConfig, FriVerifierParams, NativeFriParams, OpeningTranscript, PcsRecursionBackend,
-    Poseidon2Config, PreparedInput, PreparedPcsRecursionBackend, RecursionInput, RecursiveAir,
-    VerificationError, VerifierCircuitResult, build_next_layer_circuit, observe_opened_values,
-    replay_batch_stark_transcript, verify_batch_circuit,
+    BatchOnly, BatchStarkVerifierInputsBuilder, FriRecursionBackend, FriRecursionConfig,
+    OpeningTranscript, PcsRecursionBackend, Poseidon2Config, PreparedInput,
+    PreparedPcsRecursionBackend, RecursionInput, VerificationError, VerifierCircuitResult,
+    build_next_layer_circuit, replay_batch_stark_transcript, verify_batch_circuit,
 };
-use p3_symmetric::{PaddingFreeSponge, TruncatedPermutation};
-use p3_uni_stark::{StarkGenericConfig, Val};
-
-type F = Goldilocks;
-type EF = CubicTrinomialExtensionField<F>;
-type Perm = Poseidon2Goldilocks<WIDTH>;
-type Hash = PaddingFreeSponge<Perm, WIDTH, RATE, DIGEST>;
-type Compress = TruncatedPermutation<Perm, 2, DIGEST, WIDTH>;
-type ValMmcs = GoldilocksD3W12ValMmcs;
-type ChallengeMmcs = ExtensionMmcs<F, EF, ValMmcs>;
-type NativePcs = TwoAdicFriPcs<F, Radix2DitParallel<F>, ValMmcs, ChallengeMmcs>;
-type Challenger = <GoldilocksD3W12Config as StarkGenericConfig>::Challenger;
-
-type Commitment = MerkleCapTargets<F, DIGEST>;
-type InputProof = InputProofTargets<F, EF, RecValMmcs<F, DIGEST, Hash, Compress>>;
-type OpeningProof = FriProofTargets<
-    F,
-    EF,
-    RecExtensionValMmcs<F, EF, DIGEST, RecValMmcs<F, DIGEST, Hash, Compress>>,
-    InputProof,
-    Witness<F>,
->;
-
-/// The D3 recursion backend under test.
-type Backend = FriRecursionBackendForExt<3, WIDTH, RATE, Poseidon2Config>;
-
-const D: usize = 3;
-const WIDTH: usize = 12;
-const RATE: usize = 6;
-const DIGEST: usize = 6;
-const PERM: Poseidon2Config = Poseidon2Config::GOLDILOCKS_D3_W12;
-
-/// Small FRI parameters in lrup's shape.
-const LOG_BLOWUP: usize = 1;
-const MAX_LOG_ARITY: usize = 3;
-const NUM_QUERIES: usize = 8;
-const QUERY_POW_BITS: usize = 4;
-
-// ---------------------------------------------------------------------------------------------
-// The recursion FRI config: `GoldilocksD3W12Config` with lrup-shaped test FRI parameters, plus
-// what the in-circuit verifier needs (modelled on `common::KoalaBearD4RecursionConfig`).
-// ---------------------------------------------------------------------------------------------
-
-#[derive(Clone)]
-struct D3RecursionConfig {
-    config: Arc<GoldilocksD3W12Config>,
-    fri_verifier_params: FriVerifierParams,
-    native_fri_params: NativeFriParams,
-    val_mmcs: ValMmcs,
-    fri_params: FriParameters<ChallengeMmcs>,
-}
-
-impl D3RecursionConfig {
-    fn new() -> Self {
-        let perm = default_goldilocks_poseidon2_12();
-        let val_mmcs = ValMmcs::new(Hash::new(perm.clone()), Compress::new(perm.clone()), 0);
-        let fri_params = FriParameters {
-            log_blowup: LOG_BLOWUP,
-            log_final_poly_len: 0,
-            max_log_arity: MAX_LOG_ARITY,
-            num_queries: NUM_QUERIES,
-            batch_proof_of_work_bits: 0,
-            commit_proof_of_work_bits: 0,
-            query_proof_of_work_bits: QUERY_POW_BITS,
-            mmcs: ChallengeMmcs::new(val_mmcs.clone()),
-        };
-        let native_fri_params = NativeFriParams::try_from_native::<F, _>(&fri_params).unwrap();
-        let fri_verifier_params = FriVerifierParams::with_mmcs(
-            native_fri_params.log_blowup(),
-            native_fri_params.log_final_poly_len(),
-            native_fri_params.max_log_arity(),
-            native_fri_params.commit_pow_bits(),
-            native_fri_params.query_pow_bits(),
-            native_fri_params.num_queries(),
-            PERM,
-        );
-        let pcs = NativePcs::new(
-            Radix2DitParallel::default(),
-            val_mmcs.clone(),
-            fri_params.clone(),
-        );
-        Self {
-            config: Arc::new(GoldilocksD3W12Config::new(pcs, Challenger::new(perm))),
-            fri_verifier_params,
-            native_fri_params,
-            val_mmcs,
-            fri_params,
-        }
-    }
-
-    /// The per-query Merkle paths of a FRI proof, restored from its replayed transcript.
-    fn query_paths(
-        &self,
-        opening_proof: &<NativePcs as Pcs<EF, Challenger>>::Proof,
-        transcript: OpeningTranscript<Self>,
-    ) -> Vec<FriQueryPaths<F, DIGEST>> {
-        self.try_query_paths(opening_proof, transcript)
-            .expect("the honest FRI proof's query paths restore")
-    }
-
-    /// [`Self::query_paths`], or the native error: the restoration checks the query proof of
-    /// work and the commit-phase folding on the way.
-    fn try_query_paths(
-        &self,
-        opening_proof: &<NativePcs as Pcs<EF, Challenger>>::Proof,
-        transcript: OpeningTranscript<Self>,
-    ) -> Result<Vec<FriQueryPaths<F, DIGEST>>, String> {
-        let OpeningTranscript {
-            mut challenger,
-            commitments_with_opening_points,
-        } = transcript;
-        observe_opened_values::<Self>(
-            &mut challenger,
-            &commitments_with_opening_points,
-            self.fri_params.batch_proof_of_work_bits,
-        );
-        let claims: Vec<_> = commitments_with_opening_points
-            .into_iter()
-            .map(Into::into)
-            .collect();
-        restore_fri_query_paths(
-            &self.fri_params,
-            &self.val_mmcs,
-            &self.val_mmcs,
-            opening_proof,
-            &mut challenger,
-            &claims,
-        )
-        .map_err(|error| format!("{error:?}"))
-    }
-}
-
-impl StarkGenericConfig for D3RecursionConfig {
-    type Challenge = EF;
-    type Challenger = Challenger;
-    type Pcs = NativePcs;
-    fn pcs(&self) -> &NativePcs {
-        self.config.pcs()
-    }
-    fn initialise_challenger(&self) -> Challenger {
-        self.config.initialise_challenger()
-    }
-}
-
-impl FriRecursionConfig for D3RecursionConfig
-where
-    NativePcs: RecursivePcs<
-            Self,
-            InputProof,
-            OpeningProof,
-            Commitment,
-            <NativePcs as Pcs<EF, Challenger>>::Domain,
-        >,
-{
-    type Commitment = Commitment;
-    type InputProof = InputProof;
-    type OpeningProof = OpeningProof;
-    type RawOpeningProof = <NativePcs as Pcs<EF, Challenger>>::Proof;
-    const DIGEST_ELEMS: usize = DIGEST;
-
-    fn native_fri_validation_params(&self) -> Option<NativeFriParams> {
-        Some(self.native_fri_params)
-    }
-
-    fn with_fri_opening_proof<'a, A, R>(
-        prev: &RecursionInput<'a, Self, A>,
-        f: impl FnOnce(&Self::RawOpeningProof) -> R,
-    ) -> R
-    where
-        A: RecursiveAir<Val<Self>, Self::Challenge, LogUpGadget>,
-    {
-        match prev {
-            RecursionInput::UniStark { proof, .. } => f(&proof.opening_proof),
-            RecursionInput::BatchStark { proof, .. } => f(&proof.proof.opening_proof),
-        }
-    }
-
-    fn prepare_circuit_for_verification(
-        &self,
-        circuit: &mut CircuitBuilder<EF>,
-    ) -> Result<(), VerificationError> {
-        circuit.enable_poseidon2_perm_width_12::<GoldilocksD3Width12, _>(
-            generate_poseidon2_trace::<EF, GoldilocksD3Width12>,
-            default_goldilocks_poseidon2_12(),
-        );
-        circuit.enable_recompose::<F>(generate_recompose_trace::<F, EF>);
-        Ok(())
-    }
-
-    fn pcs_verifier_params(&self) -> &FriVerifierParams {
-        &self.fri_verifier_params
-    }
-
-    fn set_fri_private_data(
-        config: &Self,
-        runner: &mut CircuitRunner<'_, EF>,
-        op_ids: &[NonPrimitiveOpId],
-        opening_proof: &Self::RawOpeningProof,
-        transcript: OpeningTranscript<Self>,
-    ) -> Result<(), &'static str> {
-        let query_paths = config.query_paths(opening_proof, transcript);
-        set_fri_mmcs_private_data::<F, EF, DIGEST>(runner, op_ids, &query_paths, PERM)
-    }
-}
 
 // ---------------------------------------------------------------------------------------------
 // Toy AIRs: `Squares` (8 rows, preprocessed) sends `(x, y)` on a global bus, `Lookup` (16 rows)
@@ -394,7 +183,7 @@ impl ToyProof {
     }
 
     fn prove(unbalanced: bool) -> Self {
-        let config = D3RecursionConfig::new();
+        let config = D3RecursionConfig::new(D3FriParams::test_params());
         let airs = [ToyAir::Squares, ToyAir::Lookup];
         let traces = toy_traces(unbalanced);
         let public_values = vec![vec![F::from_u64(X0)], vec![]];
@@ -517,56 +306,6 @@ impl VerifierCircuit {
         .expect("the query paths fit the circuit's MMCS operations");
         runner.run()
     }
-}
-
-/// The D3 backend for `GOLDILOCKS_D3_W12`.
-fn backend() -> Backend {
-    FriRecursionBackend::<WIDTH, RATE, _>::new(PERM).for_extension_degree::<D>()
-}
-
-/// Prove a D3 verifier circuit with the tables the D3 backend registers, and verify the proof.
-fn prove_layer(
-    config: &D3RecursionConfig,
-    circuit: &Circuit<EF>,
-    traces: &p3_circuit::tables::Traces<EF>,
-) -> BatchStarkProof<D3RecursionConfig> {
-    let backend = backend();
-    let preprocessors =
-        PcsRecursionBackend::<D3RecursionConfig, BatchOnly, D>::non_primitive_preprocessors(
-            &backend,
-        );
-    let air_builders =
-        PcsRecursionBackend::<D3RecursionConfig, BatchOnly, D>::non_primitive_air_builders(
-            &backend,
-        );
-    let mut prover =
-        BatchStarkProver::new(config.clone()).with_table_packing(TablePacking::new(2, 4));
-    for table in
-        PcsRecursionBackend::<D3RecursionConfig, BatchOnly, D>::non_primitive_provers(&backend, D)
-    {
-        prover.register_table_prover(table);
-    }
-    let prepared = prover
-        .prepare_circuit::<EF, D>(
-            circuit,
-            &preprocessors,
-            &air_builders,
-            ConstraintProfile::Standard,
-        )
-        .expect("the D3 verifier circuit prepares");
-    let proof = prepared
-        .prove(traces)
-        .expect("the D3 verifier circuit proves");
-    assert_eq!(proof.ext_degree, D);
-    assert!(
-        proof.alu_quintic_trinomial,
-        "D3 uses the cubic trinomial ALU"
-    );
-    prepared
-        .verifier()
-        .verify(&proof, &[])
-        .expect("the D3 layer proof verifies natively");
-    proof
 }
 
 fn describe_layer(proof: &BatchStarkProof<D3RecursionConfig>) {
@@ -747,21 +486,8 @@ fn d3_backend_builds_and_runs_the_layer_verifier() {
     let layer = prove_layer(&toy.config, &verifier.circuit, &traces);
 
     let backend = backend();
-    // As `RecursionOutput::into_recursion_input`: no public values on the primitive tables, then
-    // each non-primitive table's attached vector.
-    let num_primitive = layer.proof.opened_values.instances.len() - layer.non_primitives.len();
-    let mut table_public_inputs = vec![vec![]; num_primitive];
-    table_public_inputs.extend(
-        layer
-            .non_primitives
-            .iter()
-            .map(|entry| entry.public_values.clone()),
-    );
-    let prev: RecursionInput<'_, D3RecursionConfig, BatchOnly> = RecursionInput::BatchStark {
-        proof: &layer,
-        common_data: &layer.stark_common,
-        table_public_inputs,
-    };
+    // As `RecursionOutput::into_recursion_input`.
+    let prev = layer_input(&layer);
     let contract =
         PreparedPcsRecursionBackend::<D3RecursionConfig, BatchOnly, D>::capture_input_contract(
             &backend,
@@ -823,7 +549,7 @@ fn d3_backend_builds_and_runs_the_layer_verifier() {
 /// refuses any other challenger config before building a circuit.
 #[test]
 fn d3_backend_rejects_a_challenger_of_another_degree() {
-    let config = D3RecursionConfig::new();
+    let config = D3RecursionConfig::new(D3FriParams::test_params());
     let backend = FriRecursionBackend::<WIDTH, RATE, _>::new(Poseidon2Config::GOLDILOCKS_D2_W8)
         .for_extension_degree::<D>();
     let mut builder = CircuitBuilder::<EF>::new();
