@@ -83,6 +83,12 @@ where
                 common_data,
                 non_primitive_provers,
             ),
+            3 => replay_batch_layer_transcript::<SC, 3>(
+                config,
+                proof,
+                common_data,
+                non_primitive_provers,
+            ),
             4 => replay_batch_layer_transcript::<SC, 4>(
                 config,
                 proof,

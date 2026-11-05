@@ -685,7 +685,7 @@ where
                     proof.ext_degree
                 )));
             }
-            if !matches!(proof.ext_degree, 1 | 2 | 4 | 5) {
+            if !matches!(proof.ext_degree, 1..=5) {
                 return Err(VerificationError::InvalidProofShape(format!(
                     "unsupported batch proof ext_degree {}",
                     proof.ext_degree
@@ -700,6 +700,12 @@ where
                     &non_primitive_provers,
                 )?,
                 2 => reconstruct_and_validate_public_inputs::<SC, 2>(
+                    config,
+                    proof,
+                    table_public_inputs,
+                    &non_primitive_provers,
+                )?,
+                3 => reconstruct_and_validate_public_inputs::<SC, 3>(
                     config,
                     proof,
                     table_public_inputs,

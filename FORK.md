@@ -240,3 +240,46 @@ D3 proofs needs the recursion backend (WP5).
 
 **Upstreamable.** Yes. It adds one table variant, prover and config, and leaves the existing
 configurations unchanged.
+
+### WP5: recursion backend for D3
+
+**What changed.**
+
+- `recursion/src/backend/fri.rs`:
+  - `PcsRecursionBackend<SC, A, 3>` for `FriRecursionBackendForExt<3, ..>`, a copy of the
+    `D = 2` backend. `Val<SC>` is bound by `CubicTrinomialExtendable` (no binomial bound), the
+    tables are proved by `Poseidon2ProverD3` and `RecomposeProver::<3>`, and the AIR builders
+    are `poseidon2_air_builders_for_configs::<SC, 3>` plus `RecomposeAirBuilder::<3>`. Hashing
+    follows the Goldilocks D2/W8 path with `GOLDILOCKS_D3_W12` (cubic limbs), not the KoalaBear
+    D5 path. There is no degree-3 Poseidon1 prover, so `prepare_circuit`, `validate_input` and
+    `build_verifier_circuit` reject a challenger config that is not a degree-3 Poseidon2 one.
+  - `GOLDILOCKS_D3_W12` joins the configs whose challenger and ordinary rows share one
+    physical table (`goldilocks_d3_w12_shared`), like `GOLDILOCKS_D2_W8`.
+  - `impl_prepared_fri_backend!` for `D = 3` (prepared and trusted backends), with the macro's
+    field-bound parameter renamed from `$binomial_bound` to `$field_bound`.
+  - `3 =>` arms in the batch-degree dispatches: native layout planning, verifier-circuit
+    construction, and the trusted batch tables, preflight, circuit and private data.
+- `recursion/src/backend/transcript.rs`: `3 =>` arm for the batch-layer transcript replay.
+- `recursion/src/prepared/input.rs`: degree 3 accepted by the built-in input contract, with a
+  `3 =>` arm for the public-input reconstruction.
+- `recursion/src/verifier/errors.rs`: the error-conversion test uses degree 7, not 3, as its
+  unsupported degree.
+- Tests (`recursion/tests/goldilocks_d3_recursion.rs`, a new test target): a custom
+  `FriRecursionConfig` over `GoldilocksD3W12Config` with small FRI parameters in lrup's shape
+  (`max_log_arity` 3, `log_final_poly_len` 0, query PoW 4 bits, cap height 0).
+  - A native batch proof of two toy AIRs (8 and 16 rows, a preprocessed column, a global
+    lookup between them, a public value) is verified in-circuit with `verify_batch_circuit`.
+    The verification circuit is proved at `D = 3` with the tables the D3 backend registers (the
+    shared W12 table and `recompose/coeff`) and verified natively.
+  - A changed opened value, a changed Merkle sibling (input batch and commit phase), a bad query
+    PoW witness and an unbalanced global lookup each make the circuit fail to execute.
+  - The D3 backend captures and validates the prepared input contract of that circuit proof,
+    builds its verifier circuit with `build_next_layer_circuit` and runs it with the backend's
+    private data. It rejects a challenger config of another degree.
+
+**Why.** With WP1-WP4, this lets the in-circuit verifier check batch proofs over
+`CubicTrinomialExtensionField<Goldilocks>` with W12 hashing, and lets circuit-prover prove that
+verification at `D = 3`. The built-in suite registry and its D3 suite are WP6.
+
+**Upstreamable.** Yes. Degree 3 joins the supported batch degrees for any field implementing
+`CubicTrinomialExtendable`; the existing degrees are unchanged.

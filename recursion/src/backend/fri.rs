@@ -18,11 +18,11 @@ use p3_circuit_prover::config::StarkField;
 use p3_circuit_prover::field_params::ExtractBinomialW;
 use p3_circuit_prover::{
     ConstraintProfile, Poseidon1Preprocessor, Poseidon1Prover, Poseidon1ProverD2,
-    Poseidon2Preprocessor, Poseidon2Prover, Poseidon2ProverD2, Poseidon2SharedPreprocessor,
-    RecomposePreprocessor, TableProver,
+    Poseidon2Preprocessor, Poseidon2Prover, Poseidon2ProverD2, Poseidon2ProverD3,
+    Poseidon2SharedPreprocessor, RecomposePreprocessor, TableProver,
 };
 use p3_commit::{Pcs, UnivariateStarkPcs};
-use p3_field::extension::BinomiallyExtendable;
+use p3_field::extension::{BinomiallyExtendable, CubicTrinomialExtendable};
 use p3_field::{Algebra, BasedVectorSpace, ExtensionField, PrimeCharacteristicRing, PrimeField64};
 use p3_lookup::Lookup;
 use p3_lookup::logup::LogUpGadget;
@@ -459,6 +459,7 @@ impl<const WIDTH: usize, const RATE: usize, C: ChallengerPermConfig>
                 | Poseidon2Config::KOALA_BEAR_D4_W16
                 | Poseidon2Config::KOALA_BEAR_D4_W24
                 | Poseidon2Config::GOLDILOCKS_D2_W8
+                | Poseidon2Config::GOLDILOCKS_D3_W12
         ) {
             return vec![shape.for_shared_challenger_table()];
         }
@@ -777,6 +778,7 @@ where
         RecursionInput::BatchStark { proof, .. } => match proof.ext_degree {
             1 => plan_fri_batch_for_degree::<SC, A, 1>(config, prev, provers)?,
             2 => plan_fri_batch_for_degree::<SC, A, 2>(config, prev, provers)?,
+            3 => plan_fri_batch_for_degree::<SC, A, 3>(config, prev, provers)?,
             4 => plan_fri_batch_for_degree::<SC, A, 4>(config, prev, provers)?,
             5 => plan_fri_batch_for_degree::<SC, A, 5>(config, prev, provers)?,
             degree => {
@@ -1295,6 +1297,26 @@ where
                     backend.challenger_perm_config,
                     non_primitive_provers,
                 )?,
+                3 => verify_p3_batch_proof_circuit::<
+                    SC,
+                    SC::Commitment,
+                    SC::InputProof,
+                    SC::OpeningProof,
+                    _,
+                    _,
+                    WIDTH,
+                    RATE,
+                    3,
+                >(
+                    config,
+                    circuit,
+                    proof,
+                    config.pcs_verifier_params(),
+                    common_data,
+                    &lookup_gadget,
+                    backend.challenger_perm_config,
+                    non_primitive_provers,
+                )?,
                 4 => verify_p3_batch_proof_circuit::<
                     SC,
                     SC::Commitment,
@@ -1642,6 +1664,291 @@ where
             ),
         };
         builders.push(Box::new(RecomposeAirBuilder::<2>::new(
+            self.0.recompose_lanes,
+            true,
+        )));
+        builders
+    }
+}
+
+/// The degree-3 backend proves its permutation rows with Poseidon2 only: circuit-prover has no
+/// degree-3 Poseidon1 prover, and a degree-3 circuit packs every permutation into cubic limbs.
+fn check_d3_challenger<C: ChallengerPermConfig>(config: &C) -> Result<(), VerificationError> {
+    match config.as_poseidon2() {
+        Some(poseidon2) if poseidon2.d() == 3 => Ok(()),
+        _ => Err(VerificationError::InvalidProofShape(
+            "the degree-3 FRI recursion backend requires a degree-3 Poseidon2 challenger config"
+                .into(),
+        )),
+    }
+}
+
+/// Degree-3 backend, for the cubic trinomial challenge field
+/// (`CubicTrinomialExtensionField<Goldilocks>`, `X^3 = X + 1`) with the `GOLDILOCKS_D3_W12`
+/// permutation. A copy of the `D = 2` backend: the field is not binomial, so `Val<SC>` is bound
+/// by [`CubicTrinomialExtendable`], and the tables are proved by [`Poseidon2ProverD3`].
+impl<SC, A, const WIDTH: usize, const RATE: usize, C> PcsRecursionBackend<SC, A, 3>
+    for FriRecursionBackendForExt<3, WIDTH, RATE, C>
+where
+    SC::Challenger: p3_challenger::GrindingChallenger<Witness = p3_uni_stark::Val<SC>>,
+    SC: FriRecursionConfig + Send + Sync + 'static,
+    A: RecursiveAir<Val<SC>, SC::Challenge, LogUpGadget>,
+    C: ChallengerPermConfig + Copy + 'static,
+    Val<SC>: PrimeField64 + CubicTrinomialExtendable + StarkField,
+    Poseidon1Preprocessor: NpoPreprocessor<Val<SC>>,
+    Poseidon2Preprocessor: NpoPreprocessor<Val<SC>>,
+    Poseidon2SharedPreprocessor: NpoPreprocessor<Val<SC>>,
+    RecomposePreprocessor: NpoPreprocessor<Val<SC>>,
+    SC::Challenge: BasedVectorSpace<Val<SC>>
+        + From<Val<SC>>
+        + ExtensionField<Val<SC>>
+        + PrimeCharacteristicRing
+        + ExtractBinomialW<Val<SC>>,
+    <SC::Pcs as Pcs<SC::Challenge, SC::Challenger>>::Domain: Clone,
+    SymbolicExpressionExt<Val<SC>, SC::Challenge>:
+        From<p3_uni_stark::SymbolicExpression<Val<SC>>> + Algebra<SC::Challenge>,
+    SC::Pcs: RecursivePcs<
+            SC,
+            SC::InputProof,
+            SC::OpeningProof,
+            SC::Commitment,
+            <SC::Pcs as Pcs<SC::Challenge, SC::Challenger>>::Domain,
+            VerifierParams = FriVerifierParams,
+        >,
+    SC::Commitment: CheckedFriCommitment<SC::Challenge>,
+    SC::OpeningProof: CheckedFriOpening<SC::Challenge, SC::Commitment>,
+{
+    type VerifierResult = CheckedFriVerifierResult<SC>;
+
+    fn validate_input(
+        &self,
+        config: &SC,
+        prev: &RecursionInput<'_, SC, A>,
+    ) -> Result<(), VerificationError> {
+        check_d3_challenger(&self.0.challenger_perm_config)?;
+        let provers = match prev {
+            RecursionInput::BatchStark { proof, .. } => {
+                PcsRecursionBackend::<SC, A, 3>::input_table_provers(
+                    self,
+                    proof.ext_degree,
+                    &proof
+                        .non_primitives
+                        .iter()
+                        .map(|entry| entry.op_type.clone())
+                        .collect::<Vec<_>>(),
+                )
+            }
+            _ => Vec::new(),
+        };
+        preflight_fri_context(config, prev, &provers).map(|_| ())
+    }
+
+    fn preflight_input(
+        &self,
+        config: &SC,
+        prev: &RecursionInput<'_, SC, A>,
+    ) -> Result<(), VerificationError> {
+        preflight_fri_input(config, &self.0.limits, prev)
+    }
+
+    /// # Errors
+    /// Rejects a challenger config other than a degree-3 Poseidon2 one, and propagates any
+    /// error while enabling the verifier operations required by the config.
+    fn prepare_circuit(
+        &self,
+        config: &SC,
+        circuit: &mut CircuitBuilder<SC::Challenge>,
+    ) -> Result<(), VerificationError> {
+        check_d3_challenger(&self.0.challenger_perm_config)?;
+        config.prepare_circuit_for_verification(circuit)
+    }
+
+    fn build_verifier_circuit(
+        &self,
+        prev: &RecursionInput<'_, SC, A>,
+        config: &SC,
+        circuit: &mut CircuitBuilder<SC::Challenge>,
+    ) -> Result<Self::VerifierResult, VerificationError> {
+        check_d3_challenger(&self.0.challenger_perm_config)?;
+        preflight_fri_input(config, &self.0.limits, prev)?;
+        let provers = match prev {
+            RecursionInput::BatchStark { proof, .. } => {
+                PcsRecursionBackend::<SC, A, 3>::input_table_provers(
+                    self,
+                    proof.ext_degree,
+                    &proof
+                        .non_primitives
+                        .iter()
+                        .map(|entry| entry.op_type.clone())
+                        .collect::<Vec<_>>(),
+                )
+            }
+            _ => Vec::new(),
+        };
+        build_verifier_circuit_impl(&self.0, prev, config, circuit, &provers)
+    }
+
+    fn set_private_data(
+        &self,
+        config: &SC,
+        runner: &mut CircuitRunner<'_, SC::Challenge>,
+        op_ids: &[NonPrimitiveOpId],
+        prev: &RecursionInput<'_, SC, A>,
+    ) -> Result<(), &'static str> {
+        preflight_fri_input(config, &self.0.limits, prev)
+            .map_err(|_| "FRI input exceeds verifier resource limits")?;
+        // The same plugin list `build_verifier_circuit` used, so the transcript is replayed
+        // against the AIRs the circuit was built for.
+        let provers = match prev {
+            RecursionInput::BatchStark { proof, .. } => {
+                PcsRecursionBackend::<SC, A, 3>::input_table_provers(
+                    self,
+                    proof.ext_degree,
+                    &proof
+                        .non_primitives
+                        .iter()
+                        .map(|entry| entry.op_type.clone())
+                        .collect::<Vec<_>>(),
+                )
+            }
+            _ => Vec::new(),
+        };
+        let transcript = replay_recursion_input_transcript(config, prev, &provers)
+            .map_err(|_| "Failed to replay the input proof's verifier transcript")?;
+        SC::with_fri_opening_proof(prev, move |opening_proof| {
+            SC::set_fri_private_data(config, runner, op_ids, opening_proof, transcript)
+        })
+    }
+
+    fn set_private_data_for_result(
+        &self,
+        config: &SC,
+        runner: &mut CircuitRunner<'_, SC::Challenge>,
+        result: &Self::VerifierResult,
+        prev: &RecursionInput<'_, SC, A>,
+    ) -> Result<(), &'static str> {
+        preflight_fri_input(config, &self.0.limits, prev)
+            .map_err(|_| "FRI input exceeds verifier resource limits")?;
+        result
+            .validate_config(config)
+            .map_err(|_| "FRI verifier configuration differs from retained authority")?;
+        result
+            .validate_replacement(prev)
+            .map_err(|_| "FRI replacement input failed retained contextual validation")?;
+        <Self as PcsRecursionBackend<SC, A, 3>>::set_private_data(
+            self,
+            config,
+            runner,
+            <Self::VerifierResult as VerifierCircuitResult<SC, A>>::op_ids(result),
+            prev,
+        )
+    }
+
+    fn non_primitive_preprocessors(&self) -> Vec<Box<dyn NpoPreprocessor<Val<SC>>>> {
+        let configs: Vec<Poseidon2Config> = self
+            .0
+            .challenger_perm_config
+            .as_poseidon2()
+            .map(|config| {
+                self.0
+                    .poseidon2_challenger_shape_configs(*config)
+                    .into_iter()
+                    .filter(|config| config.is_shared())
+                    .collect()
+            })
+            .unwrap_or_default();
+        let perm_prep = if configs.is_empty() {
+            poseidon2_preprocessor::<Val<SC>>()
+        } else {
+            Box::new(Poseidon2SharedPreprocessor::new(configs))
+        };
+        vec![perm_prep, recompose_preprocessor::<Val<SC>>(true)]
+    }
+
+    fn non_primitive_provers(&self, ext_degree: usize) -> Vec<Box<dyn TableProver<SC>>> {
+        if ext_degree != 3 {
+            return Vec::new();
+        }
+        // As at `D = 2`, every packed or unpacked extension limb goes through the
+        // `recompose/coeff` table, so the plain recompose table never carries a row.
+        let mut provers: Vec<Box<dyn TableProver<SC>>> = Vec::new();
+        if let Some(c) = self.0.challenger_perm_config.as_poseidon2() {
+            for config in self.0.poseidon2_challenger_shape_configs(*c) {
+                provers.push(Box::new(Poseidon2ProverD3::new(
+                    config,
+                    ConstraintProfile::Standard,
+                )));
+            }
+        }
+        for config in self.0.extra_poseidon2_table_configs_for_degree(3) {
+            provers.push(Box::new(Poseidon2ProverD3::new(
+                config,
+                ConstraintProfile::Standard,
+            )));
+        }
+        provers.push(Box::new(RecomposeProver::<3>::new(
+            self.0.recompose_lanes,
+            true,
+        )));
+        provers
+    }
+
+    fn non_primitive_input_provers(
+        &self,
+        ext_degree: usize,
+        op_types: &[p3_circuit::ops::NpoTypeId],
+    ) -> Vec<Box<dyn TableProver<SC>>> {
+        let fallback = || {
+            if self.0.expect_extra_poseidon2_input_tables {
+                <Self as PcsRecursionBackend<SC, A, 3>>::non_primitive_provers(self, ext_degree)
+            } else {
+                let mut input_backend = (*self).clone();
+                input_backend.0.extra_poseidon2_table_configs.clear();
+                <Self as PcsRecursionBackend<SC, A, 3>>::non_primitive_provers(
+                    &input_backend,
+                    ext_degree,
+                )
+            }
+        };
+        let Some(challenger) = self.0.challenger_perm_config.as_poseidon2().copied() else {
+            return fallback();
+        };
+        let legacy_ids: Vec<_> = self
+            .0
+            .poseidon2_legacy_challenger_shape_configs(challenger)
+            .into_iter()
+            .map(p3_circuit::ops::NpoTypeId::poseidon2_perm)
+            .collect();
+        if !legacy_ids.iter().any(|id| op_types.contains(id)) {
+            return fallback();
+        }
+        if ext_degree != 3 {
+            return fallback();
+        }
+        let mut provers = Vec::new();
+        for config in self.0.poseidon2_legacy_challenger_shape_configs(challenger) {
+            provers.push(
+                Box::new(Poseidon2ProverD3::new(config, ConstraintProfile::Standard))
+                    as Box<dyn TableProver<SC>>,
+            );
+        }
+        for config in self.0.extra_poseidon2_table_configs_for_input_degree(3) {
+            provers.push(Box::new(Poseidon2ProverD3::new(
+                config,
+                ConstraintProfile::Standard,
+            )));
+        }
+        provers.push(Box::new(RecomposeProver::<3>::new(
+            self.0.recompose_lanes,
+            true,
+        )));
+        provers
+    }
+
+    fn non_primitive_air_builders(&self) -> Vec<Box<dyn NpoAirBuilder<SC, 3>>> {
+        let mut builders =
+            poseidon2_air_builders_for_configs::<SC, 3>(self.0.poseidon2_air_configs_for_degree(3));
+        builders.push(Box::new(RecomposeAirBuilder::<3>::new(
             self.0.recompose_lanes,
             true,
         )));
@@ -2188,7 +2495,7 @@ where
 }
 
 macro_rules! impl_prepared_fri_backend {
-    ($backend:ty, $d:literal, $binomial_bound:path) => {
+    ($backend:ty, $d:literal, $field_bound:path) => {
         impl<SC, A, const WIDTH: usize, const RATE: usize, C> PreparedPcsRecursionBackend<SC, A, $d>
             for $backend
         where
@@ -2196,7 +2503,7 @@ macro_rules! impl_prepared_fri_backend {
             SC: FriRecursionConfig + Send + Sync + 'static,
             A: RecursiveAir<Val<SC>, SC::Challenge, LogUpGadget>,
             C: ChallengerPermConfig + Copy + 'static,
-            Val<SC>: PrimeField64 + StarkField + $binomial_bound,
+            Val<SC>: PrimeField64 + StarkField + $field_bound,
             Poseidon1Preprocessor: NpoPreprocessor<Val<SC>>,
             Poseidon2Preprocessor: NpoPreprocessor<Val<SC>>,
             Poseidon2SharedPreprocessor: NpoPreprocessor<Val<SC>>,
@@ -2284,7 +2591,7 @@ macro_rules! impl_prepared_fri_backend {
             SC: FriRecursionConfig + Send + Sync + 'static,
             A: RecursiveAir<Val<SC>, SC::Challenge, LogUpGadget>,
             C: ChallengerPermConfig + Copy + 'static,
-            Val<SC>: PrimeField64 + StarkField + $binomial_bound,
+            Val<SC>: PrimeField64 + StarkField + $field_bound,
             Poseidon1Preprocessor: NpoPreprocessor<Val<SC>>,
             Poseidon2Preprocessor: NpoPreprocessor<Val<SC>>,
             Poseidon2SharedPreprocessor: NpoPreprocessor<Val<SC>>,
@@ -2384,6 +2691,7 @@ macro_rules! impl_prepared_fri_backend {
                 let table_public_inputs = match degree {
                     1 => trusted_batch_tables::<SC, 1>(verifier, statement)?.public_values,
                     2 => trusted_batch_tables::<SC, 2>(verifier, statement)?.public_values,
+                    3 => trusted_batch_tables::<SC, 3>(verifier, statement)?.public_values,
                     4 => trusted_batch_tables::<SC, 4>(verifier, statement)?.public_values,
                     5 => trusted_batch_tables::<SC, 5>(verifier, statement)?.public_values,
                     degree => {
@@ -2403,6 +2711,7 @@ macro_rules! impl_prepared_fri_backend {
                 let (pcs_context, stark_authority, policy) = match degree {
                     1 => preflight_trusted_fri_batch::<SC, A, 1>(verifier, proof, statement)?,
                     2 => preflight_trusted_fri_batch::<SC, A, 2>(verifier, proof, statement)?,
+                    3 => preflight_trusted_fri_batch::<SC, A, 3>(verifier, proof, statement)?,
                     4 => preflight_trusted_fri_batch::<SC, A, 4>(verifier, proof, statement)?,
                     5 => preflight_trusted_fri_batch::<SC, A, 5>(verifier, proof, statement)?,
                     _ => unreachable!(),
@@ -2434,6 +2743,7 @@ macro_rules! impl_prepared_fri_backend {
                 let (verifier_inputs, op_ids) = match degree {
                     1 => build_for_degree!(1)?,
                     2 => build_for_degree!(2)?,
+                    3 => build_for_degree!(3)?,
                     4 => build_for_degree!(4)?,
                     5 => build_for_degree!(5)?,
                     _ => unreachable!(),
@@ -2465,6 +2775,10 @@ macro_rules! impl_prepared_fri_backend {
                     2 => (
                         replay_trusted_batch_layer_transcript::<SC, 2>(verifier, proof, statement)?,
                         trusted_batch_tables::<SC, 2>(verifier, statement)?.public_values,
+                    ),
+                    3 => (
+                        replay_trusted_batch_layer_transcript::<SC, 3>(verifier, proof, statement)?,
+                        trusted_batch_tables::<SC, 3>(verifier, statement)?.public_values,
                     ),
                     4 => (
                         replay_trusted_batch_layer_transcript::<SC, 4>(verifier, proof, statement)?,
@@ -2546,6 +2860,11 @@ impl_prepared_fri_backend!(
     FriRecursionBackendForExt<2, WIDTH, RATE, C>,
     2,
     BinomiallyExtendable<2>
+);
+impl_prepared_fri_backend!(
+    FriRecursionBackendForExt<3, WIDTH, RATE, C>,
+    3,
+    CubicTrinomialExtendable
 );
 impl_prepared_fri_backend!(
     FriRecursionBackendForExt<4, WIDTH, RATE, C>,

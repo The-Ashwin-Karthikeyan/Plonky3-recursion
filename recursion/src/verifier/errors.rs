@@ -118,16 +118,16 @@ mod tests {
 
     #[test]
     fn prover_error_preserves_setup_variant_and_source() {
-        let error = VerificationError::from(BatchStarkProverError::UnsupportedDegree(3));
+        let error = VerificationError::from(BatchStarkProverError::UnsupportedDegree(7));
 
         assert!(matches!(
             error,
-            VerificationError::Prover(BatchStarkProverError::UnsupportedDegree(3))
+            VerificationError::Prover(BatchStarkProverError::UnsupportedDegree(7))
         ));
         assert!(
             error
                 .to_string()
-                .contains("unsupported extension degree: 3")
+                .contains("unsupported extension degree: 7")
         );
         assert!(
             error
@@ -135,7 +135,7 @@ mod tests {
                 .and_then(|source| source.downcast_ref::<BatchStarkProverError>())
                 .is_some_and(|source| matches!(
                     source,
-                    BatchStarkProverError::UnsupportedDegree(3)
+                    BatchStarkProverError::UnsupportedDegree(7)
                 ))
         );
     }
