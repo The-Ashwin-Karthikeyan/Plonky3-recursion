@@ -2,17 +2,15 @@
 //!
 //! `verify_batch_circuit_arity4` packs each leaf's opened base-field coefficients into extension
 //! limbs before absorbing them into the wide sponge, via the same `add_hash_base_coeffs_overwrite`
-//! helper `verify_batch_circuit` uses. The recompose NPO table publishes only its own output on
-//! the `WitnessChecks` bus: the packed limb's `v_0..v_{D-1}` columns are free main-trace columns
-//! and the coefficient witness ids appear nowhere on the bus, so a limb packed that way carries no
-//! relation to the coefficients the leaf is supposed to be made of, and re-pointing the row at
-//! another coefficient group leaves the verifier's preprocessed columns untouched. The ALU
-//! `mul_add` chain reads every coefficient as a bus-bound operand and carries the operand witness
-//! ids in the ALU table's preprocessed columns, so the limb is tied to the coefficients and the
-//! same edit is visible to the verifier.
+//! helper `verify_batch_circuit` uses and under the same policy: a permutation that absorbs
+//! extension limbs (`d() == EF::DIMENSION > 1`) packs them with the `recompose/coeff` table. That
+//! table publishes each coefficient on the `WitnessChecks` bus as a base-field element and records
+//! the coefficient witness ids in its preprocessed columns, so the limb is tied to the
+//! coefficients and re-pointing a packing row at another coefficient is visible to the verifier.
+//! The plain recompose table publishes only its output limb and is never used for leaves.
 //!
-//! Both tests build the leaf hash with the recompose NPO table *enabled*, which is the
-//! configuration in which the two lowerings differ.
+//! Both tests build the leaf hash with the recompose NPO table *enabled*, so the plain table
+//! would be available to the lowering.
 
 use p3_circuit::ops::{Op, Poseidon2Config, generate_poseidon2_trace, generate_recompose_trace};
 use p3_circuit::{Circuit, CircuitBuilder, WitnessId};
@@ -122,8 +120,34 @@ fn permutation_input_witnesses(circuit: &Circuit<EF>) -> Vec<WitnessId> {
         .collect()
 }
 
+fn is_exact_npo_type(op: &Op<EF>, expected: &str) -> bool {
+    match op {
+        Op::NonPrimitiveOpWithExecutor { executor, .. } => executor.op_type().as_str() == expected,
+        _ => false,
+    }
+}
+
+/// The leaf limbs absorbed by the first permutation, which hashes the leaf: its first
+/// `LEAF_WIDTH / D` rate inputs.
+fn leaf_hash_input_witnesses(circuit: &Circuit<EF>) -> Vec<WitnessId> {
+    circuit
+        .ops
+        .iter()
+        .find(|op| is_npo_type(op, "poseidon2_perm"))
+        .map(|op| match op {
+            Op::NonPrimitiveOpWithExecutor { inputs, .. } => inputs
+                .iter()
+                .take(LEAF_WIDTH / D)
+                .flatten()
+                .copied()
+                .collect(),
+            _ => unreachable!(),
+        })
+        .expect("the leaf hash runs a permutation")
+}
+
 #[test]
-fn arity4_leaf_hash_limbs_are_packed_by_the_alu_chain() {
+fn arity4_leaf_hash_limbs_use_coefficient_bound_recompose() {
     let circuit = build_arity4_leaf_hash_circuit();
 
     assert!(
@@ -131,56 +155,63 @@ fn arity4_leaf_hash_limbs_are_packed_by_the_alu_chain() {
         "the recompose NPO table must be enabled for this test to say anything"
     );
 
-    let perm_inputs = permutation_input_witnesses(&circuit);
-    assert!(
-        !perm_inputs.is_empty(),
-        "the leaf hash must run at least one permutation"
-    );
-
-    let mut alu_packed = 0;
-    for wid in perm_inputs {
+    for wid in permutation_input_witnesses(&circuit) {
         let writer = &circuit.ops[writer_position(&circuit, wid)];
         assert!(
-            !is_npo_type(writer, "recompose"),
-            "a permutation reads {wid:?}, whose only writer is a recompose row: its packed \
+            !is_exact_npo_type(writer, "recompose"),
+            "a permutation reads {wid:?}, whose only writer is a plain recompose row: its packed \
              value is a free main-trace column"
         );
-        alu_packed += usize::from(matches!(writer, Op::Alu { .. }));
     }
+
+    let leaf_inputs = leaf_hash_input_witnesses(&circuit);
+    assert_eq!(
+        leaf_inputs.len(),
+        LEAF_WIDTH / D,
+        "each leaf limb is one CTL input"
+    );
     assert!(
-        alu_packed > 0,
-        "the leaf's opened coefficients must reach the sponge through an ALU packing"
+        leaf_inputs.iter().all(|&wid| {
+            is_exact_npo_type(
+                &circuit.ops[writer_position(&circuit, wid)],
+                "recompose/coeff",
+            )
+        }),
+        "every leaf limb must be written by an exact coefficient-bound row"
     );
 }
 
 #[test]
 fn re_pointing_an_arity4_leaf_hash_packing_is_visible_to_the_verifier() {
     let honest = build_arity4_leaf_hash_circuit();
+    let leaf_inputs = leaf_hash_input_witnesses(&honest);
 
-    // The first permutation limb whose packing is an ALU op, and one of its operands.
-    let packed = permutation_input_witnesses(&honest)
-        .into_iter()
-        .find(|&wid| matches!(honest.ops[writer_position(&honest, wid)], Op::Alu { .. }))
-        .expect("an ALU-packed permutation input");
-    let packing_pos = writer_position(&honest, packed);
-    let original_operand = match honest.ops[packing_pos] {
-        Op::Alu { a, .. } => a,
+    // The first leaf limb's coefficient-bound packing row, and its first operand.
+    let packing_pos = writer_position(&honest, leaf_inputs[0]);
+    assert!(is_exact_npo_type(
+        &honest.ops[packing_pos],
+        "recompose/coeff"
+    ));
+    let original_operand = match &honest.ops[packing_pos] {
+        Op::NonPrimitiveOpWithExecutor { inputs, .. } => inputs[0][0],
         _ => unreachable!(),
     };
 
     // Re-point the packing at a different coefficient the same leaf already carries.
-    let donor = permutation_input_witnesses(&honest)
-        .into_iter()
-        .filter_map(|wid| match honest.ops[writer_position(&honest, wid)] {
-            Op::Alu { a, .. } if a != original_operand => Some(a),
+    let donor = leaf_inputs
+        .iter()
+        .filter_map(|&wid| match &honest.ops[writer_position(&honest, wid)] {
+            Op::NonPrimitiveOpWithExecutor { inputs, .. } if inputs[0][0] != original_operand => {
+                Some(inputs[0][0])
+            }
             _ => None,
         })
         .next()
-        .expect("a second ALU-packed permutation input to donate an operand");
+        .expect("a second coefficient-bound leaf limb to donate an operand");
 
     let mut edited = honest.clone();
     match &mut edited.ops[packing_pos] {
-        Op::Alu { a, .. } => *a = donor,
+        Op::NonPrimitiveOpWithExecutor { inputs, .. } => inputs[0][0] = donor,
         _ => unreachable!(),
     }
 

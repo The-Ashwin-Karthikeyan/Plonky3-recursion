@@ -142,7 +142,7 @@ macro_rules! family {
         $width:expr, $rate:expr, $digest:expr, $degree:expr,
         $permutation_config:expr, $make_permutation:expr, $enable:expr,
         $stark_config:ty, $make_stark_config:expr, $air_builders:expr,
-        $preprocessor:expr, $register:ident, $public_bound:expr
+        $preprocessor:expr, $register:ident
     ) => {
         mod $name {
             use super::*;
@@ -317,25 +317,16 @@ macro_rules! family {
             }
 
             #[test]
-            fn public_route_preserves_its_packing_policy() {
+            fn public_route_uses_the_same_bound_packing() {
                 let fixture = fixture_with_route(RATE + 1, false);
-                let bound_rows =
-                    npo_rows(&fixture.circuit, &NpoTypeId::recompose_with_coeff_lookups());
-                if $public_bound {
-                    assert_bound_leaf_wiring(
-                        &fixture.circuit,
-                        cfg(),
-                        D,
-                        RATE,
-                        RATE + 1,
-                        fixture.root_limbs,
-                    );
-                } else {
-                    assert!(
-                        bound_rows.is_empty(),
-                        "public/default route keeps legacy ALU packing"
-                    );
-                }
+                assert_bound_leaf_wiring(
+                    &fixture.circuit,
+                    cfg(),
+                    D,
+                    RATE,
+                    RATE + 1,
+                    fixture.root_limbs,
+                );
             }
         }
     };
@@ -359,8 +350,7 @@ family!(
     config::goldilocks(),
     poseidon2_air_builders_for_configs::<GoldilocksConfig, 2>(vec![Poseidon2Config::GOLDILOCKS_D2_W8]),
     Poseidon2Preprocessor,
-    register_poseidon2_table,
-    false
+    register_poseidon2_table
 );
 
 family!(
@@ -381,8 +371,7 @@ family!(
     config::baby_bear(),
     poseidon1_air_builders_for_configs::<BabyBearConfig, 4>(vec![Poseidon1Config::BABY_BEAR_D4_W16]),
     Poseidon1Preprocessor,
-    register_poseidon1_table,
-    false
+    register_poseidon1_table
 );
 
 family!(
@@ -403,8 +392,7 @@ family!(
     config::goldilocks(),
     poseidon1_air_builders_for_configs::<GoldilocksConfig, 2>(vec![Poseidon1Config::GOLDILOCKS_D2_W8]),
     Poseidon1Preprocessor,
-    register_poseidon1_table,
-    false
+    register_poseidon1_table
 );
 
 family!(
@@ -425,8 +413,7 @@ family!(
     config::koala_bear(),
     poseidon2_air_builders_for_configs::<p3_circuit_prover::config::KoalaBearConfig, 4>(vec![Poseidon2Config::KOALA_BEAR_D4_W16]),
     Poseidon2Preprocessor,
-    register_poseidon2_table,
-    true
+    register_poseidon2_table
 );
 
 type KoalaQuintic = QuinticTrinomialExtensionField<KoalaBear>;

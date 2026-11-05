@@ -2,7 +2,7 @@
 //!
 //! Builds an arity-4 `verify_batch_circuit_arity4` circuit whose schedule contains a step-2 bridge
 //! and/or an injection level, runs it to witness the traces, then proves AND verifies the W32
-//! Poseidon2 + recompose tables end to end. A balanced `WitnessChecks` bus is the load-bearing
+//! Poseidon2 + recompose tables (including `recompose/coeff`, which packs the leaves) end to end. A balanced `WitnessChecks` bus is the load-bearing
 //! assertion: if the per-row producer/consumer multiplicities for the bridge/injection pad slots,
 //! the injected leaf-hash digest, or the direction-bit binding were off, `verify_all_tables` would
 //! reject with `Lookup(TerminalSumNonZero)`.
@@ -231,10 +231,10 @@ fn prove_verify_arity4(
     let stark_config = config::koala_bear();
     let npo_prep: Vec<Box<dyn NpoPreprocessor<F>>> = vec![
         Box::new(Poseidon2Preprocessor),
-        Box::new(RecomposePreprocessor::default()),
+        Box::new(RecomposePreprocessor::new(true)),
     ];
     let mut air_builders = poseidon2_air_builders::<_, 4>();
-    air_builders.extend(recompose_air_builders(1, false));
+    air_builders.extend(recompose_air_builders(1, true));
     let (airs_degrees, primitive_columns, non_primitive_columns) =
         get_airs_and_degrees_with_prep::<KoalaBearConfig, _, 4>(
             &circuit,
@@ -253,7 +253,7 @@ fn prove_verify_arity4(
 
     let mut prover = BatchStarkProver::new(stark_config).with_table_packing(table_packing);
     prover.register_poseidon2_table::<4>(permutation_config);
-    prover.register_recompose_table::<4>(false);
+    prover.register_recompose_table::<4>(true);
 
     let proof = prover
         .prove_all_tables(&traces, &circuit_prover_data)

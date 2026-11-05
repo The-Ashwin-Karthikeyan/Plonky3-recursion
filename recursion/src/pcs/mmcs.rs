@@ -37,23 +37,30 @@ enum BaseCoeffPacking {
     CoeffBound,
 }
 
-fn use_coeff_bound_binary_base_opening<F, EF>(
-    permutation_config: PermConfig,
-    salts: Option<&[Vec<Target>]>,
-) -> bool
+/// Packing policy for an MMCS leaf's base-field coefficients (opened values and, for a hiding
+/// MMCS, salts).
+///
+/// A permutation with packed degree `d() > 1` (in every supported configuration
+/// `d() == EF::DIMENSION`) absorbs extension limbs, each built from `D` leaf coefficients. Those
+/// limbs use coefficient-bound recomposition
+/// (`recompose/coeff`), which publishes every coefficient on the `WitnessChecks` bus as a
+/// base-field element, so the leaf hash binds each base coefficient individually rather than
+/// only the weighted sum `sum(c_i * basis_i)` of each limb. This holds for every field, salted
+/// or not, and for binary and arity-4 leaves alike; the caller must enable the recompose table
+/// (`RecomposeCoeffLookupsUnavailable` otherwise).
+///
+/// The ALU chain remains only where nothing is packed: a `D = 1` permutation reads each lifted
+/// base value as its own lane, and over `EF = F` a limb is its single coefficient.
+const fn base_coeff_packing<F, EF>(permutation_config: PermConfig) -> BaseCoeffPacking
 where
     F: Field,
     EF: ExtensionField<F>,
 {
-    <EF as BasedVectorSpace<F>>::DIMENSION == 4
-        && salts.is_none()
-        && permutation_config.as_poseidon2().is_some_and(|config| {
-            config.d() == 4
-                && config.width() == 16
-                && (config.is_baby_bear() || config.is_koala_bear())
-                && !config.is_challenger()
-                && !config.is_shared()
-        })
+    if <EF as BasedVectorSpace<F>>::DIMENSION > 1 && permutation_config.d() > 1 {
+        BaseCoeffPacking::CoeffBound
+    } else {
+        BaseCoeffPacking::Alu
+    }
 }
 
 /// Hash base field coefficients using overwrite-mode sponge (matching native PaddingFreeSponge).
@@ -72,9 +79,9 @@ where
 /// - `permutation_config`: Poseidon1 or Poseidon2 configuration
 /// - `base_coeffs`: Base field coefficient targets (in lifted representation)
 /// - `reset`: If true, starts a new hash chain (initial state = zeros)
-/// - `packing`: selects the binding-aware coefficient lookup table or the legacy ALU chain for
-///   recomposition and partial-chunk carry unpacking. Each caller resolves this policy before
-///   hashing; WHIR uses the bound table for matching packed D2/D4 base openings.
+/// - `packing`: selects the coefficient-bound lookup table or the ALU chain for recomposition and
+///   partial-chunk carry unpacking. Callers resolve it with [`base_coeff_packing`]; it is ignored
+///   on the `D = 1` per-lane path, which packs nothing.
 fn add_hash_base_coeffs_overwrite<F, EF>(
     circuit: &mut CircuitBuilder<EF>,
     permutation_config: &PermConfig,
@@ -376,10 +383,10 @@ where
 ///   `MerkleTreeHidingMmcs`, which commits `[row | salt]` per matrix). `None` for a
 ///   non-hiding `MerkleTreeMmcs`.
 ///
-/// For the ordinary non-hiding binary BabyBear/KoalaBear D4 W16 Poseidon2 geometry, this entry
-/// point uses the coefficient-bound recompose table for leaf packing and fails closed with
-/// `RecomposeCoeffLookupsUnavailable` when that table is not enabled. Other geometries and hiding
-/// calls retain the legacy ALU lowering.
+/// Whenever the permutation packs extension limbs (`d() == EF::DIMENSION > 1`), the opened
+/// coefficients and salts are packed with coefficient-bound recomposition (see
+/// [`base_coeff_packing`]); this fails closed with `RecomposeCoeffLookupsUnavailable` when the
+/// recompose table is not enabled. A `D = 1` permutation absorbs the lifted values directly.
 pub fn verify_batch_circuit<F, EF>(
     circuit: &mut CircuitBuilder<EF>,
     permutation_config: impl Into<PermConfig>,
@@ -394,11 +401,7 @@ where
     EF: ExtensionField<F>,
 {
     let permutation_config: PermConfig = permutation_config.into();
-    let packing = if use_coeff_bound_binary_base_opening::<F, EF>(permutation_config, salts) {
-        BaseCoeffPacking::CoeffBound
-    } else {
-        BaseCoeffPacking::Alu
-    };
+    let packing = base_coeff_packing::<F, EF>(permutation_config);
     verify_batch_circuit_with_packing::<F, EF>(
         circuit,
         permutation_config,
@@ -411,10 +414,10 @@ where
     )
 }
 
-/// Verify a WHIR base-query opening with coefficient-bound packing when its packed permutation
-/// degree matches D2 or D4. The caller must enable recompose and prove `recompose/coeff` rows for
-/// those geometries. Other degrees use the public/default policy, preserving D1 direct lifts.
-/// WHIR base-query MMCS openings carry no salts.
+/// Verify a WHIR base-query opening. Packing follows [`base_coeff_packing`], like
+/// [`verify_batch_circuit`]: coefficient-bound whenever the permutation packs extension limbs, so
+/// the caller must enable recompose and prove `recompose/coeff` rows for those geometries, and a
+/// direct lift for D1. WHIR base-query MMCS openings carry no salts.
 pub(crate) fn verify_whir_base_batch_circuit<F, EF>(
     circuit: &mut CircuitBuilder<EF>,
     permutation_config: impl Into<PermConfig>,
@@ -428,14 +431,7 @@ where
     EF: ExtensionField<F>,
 {
     let permutation_config: PermConfig = permutation_config.into();
-    let degree = <EF as BasedVectorSpace<F>>::DIMENSION;
-    let packing = if (matches!(degree, 2 | 4) && permutation_config.d() == degree)
-        || use_coeff_bound_binary_base_opening::<F, EF>(permutation_config, None)
-    {
-        BaseCoeffPacking::CoeffBound
-    } else {
-        BaseCoeffPacking::Alu
-    };
+    let packing = base_coeff_packing::<F, EF>(permutation_config);
     verify_batch_circuit_with_packing::<F, EF>(
         circuit,
         permutation_config,
@@ -635,7 +631,7 @@ where
                 &permutation_config,
                 &all_base,
                 true,
-                BaseCoeffPacking::Alu,
+                base_coeff_packing::<F, EF>(permutation_config),
                 false,
             )?
         } else {
@@ -2053,7 +2049,7 @@ where
         &permutation_config,
         leaf_data,
         true,
-        BaseCoeffPacking::Alu,
+        base_coeff_packing::<F, EF>(permutation_config),
         merkle_seed,
     )?;
     Ok(digest

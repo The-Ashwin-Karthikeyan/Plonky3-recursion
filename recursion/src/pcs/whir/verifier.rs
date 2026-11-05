@@ -420,9 +420,9 @@ where
 
 /// Verify a WHIR proof in-circuit with mandatory MMCS authentication.
 ///
-/// Matching D2/D4 base-query MMCS openings require `enable_recompose` on the circuit builder
-/// and a proving configuration containing the `recompose/coeff` table. Other degrees retain the
-/// ordinary MMCS packing policy, including D1 direct lifts.
+/// Base-query MMCS openings whose permutation packs extension limbs (`d() == EF::DIMENSION > 1`)
+/// require `enable_recompose` on the circuit builder and a proving configuration containing the
+/// `recompose/coeff` table, like every other MMCS opening. D1 permutations keep direct lifts.
 ///
 /// The arithmetic-only parameter wrapper is defined only inside this module's private
 /// `cfg(test)` unit-test lane and cannot be named by downstream code, even when all crate features

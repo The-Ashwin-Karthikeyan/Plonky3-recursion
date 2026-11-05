@@ -139,5 +139,9 @@ path = "tests/goldilocks_d3_recursion.rs"
 name = "goldilocks_d3_e2e"
 path = "tests/goldilocks_d3_e2e.rs"
 
+[[test]]
+name = "mmcs_leaf_coeff_binding"
+path = "tests/mmcs_leaf_coeff_binding.rs"
+
 [lints]
 workspace = true

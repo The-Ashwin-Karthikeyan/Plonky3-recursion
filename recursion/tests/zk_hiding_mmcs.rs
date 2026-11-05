@@ -14,8 +14,9 @@ use p3_air::{Air, AirBuilder, BaseAir, WindowAccess};
 use p3_batch_stark::{
     BatchVerificationError, ProverData, StarkInstance, prove_batch, verify_batch,
 };
+use p3_circuit::ops::recompose::RecomposeTrace;
 use p3_circuit::ops::{
-    AluOpKind, NpoTypeId, Poseidon2Trace, generate_poseidon2_trace, generate_recompose_trace,
+    NpoTypeId, Poseidon2Trace, generate_poseidon2_trace, generate_recompose_trace,
 };
 use p3_circuit::{CircuitBuilder, CircuitError, Traces, WitnessId};
 use p3_circuit_prover::batch_stark_prover::{
@@ -178,27 +179,27 @@ fn mutate_salt_leaf_poseidon_trace(
         .insert(op_type, Box::new(poseidon));
 }
 
-fn mutate_salt_alu_bus_row(traces: &mut Traces<Challenge>, salt_witness: WitnessId) {
-    let (row, operand) = traces
-        .alu_trace
-        .indices
+fn mutate_salt_recompose_row(traces: &mut Traces<Challenge>, salt_witness: WitnessId) {
+    let op_type = NpoTypeId::recompose_with_coeff_lookups();
+    let mut recompose = traces
+        .non_primitive_trace::<RecomposeTrace<F>>(&op_type)
+        .expect("hiding MMCS circuit emits the coefficient-bound recompose table")
+        .clone();
+    let (row, slot) = recompose
+        .operations
         .iter()
         .enumerate()
-        .find_map(|(row, indices)| {
-            indices[..3]
+        .find_map(|(row, op)| {
+            op.input_wids
                 .iter()
-                .position(|&index| index == salt_witness)
-                .map(|operand| (row, operand))
+                .position(|&wid| wid == salt_witness)
+                .map(|slot| (row, slot))
         })
-        .expect("the salt private input is consumed by an ALU packing row");
-    traces.alu_trace.values[row][operand] += Challenge::ONE;
-    let [a, b, c, _] = traces.alu_trace.values[row];
-    traces.alu_trace.values[row][3] = match traces.alu_trace.op_kind[row] {
-        AluOpKind::Add => a + b,
-        AluOpKind::Mul => a * b,
-        AluOpKind::MulAdd => a * b + c,
-        kind => panic!("salt packing must use a locally recomputable ALU row, got {kind:?}"),
-    };
+        .expect("the salt private input is packed by a coefficient-bound recompose row");
+    recompose.operations[row].values[slot] += F::ONE;
+    traces
+        .non_primitive_traces
+        .insert(op_type, Box::new(recompose));
 }
 
 fn prove_and_verify_outer_trace(
@@ -581,7 +582,7 @@ fn test_batch_verifier_hiding_mmcs() -> Result<(), VerificationError> {
 
     let salt_witness = verification_circuit.private_input_rows[mutated_salt_private_index];
     let mut global_lookup_mutation = verification_traces;
-    mutate_salt_alu_bus_row(&mut global_lookup_mutation, salt_witness);
+    mutate_salt_recompose_row(&mut global_lookup_mutation, salt_witness);
     let global_result = prove_and_verify_outer_trace(
         &verification_prover,
         &verification_circuit_prover_data,

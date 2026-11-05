@@ -329,3 +329,49 @@ and records the sizes later recursion work plans with. The built-in D3 suite (pe
 verifying keys) is still to come.
 
 **Upstreamable.** The tests could be, together with WP1-WP5.
+
+### WP8: coefficient-bound leaf packing for every extension degree
+
+**What changed.**
+
+- `recursion/src/pcs/mmcs.rs`: one packing policy, `base_coeff_packing`, replaces
+  `use_coeff_bound_binary_base_opening` and the WHIR-only D2/D4 rule. Whenever the permutation
+  absorbs extension limbs (`d() > 1`; `d() == EF::DIMENSION` in every supported configuration),
+  a Merkle leaf's opened values and salts are packed into limbs with coefficient-bound
+  recomposition (`recompose/coeff`), which publishes each base coefficient on the
+  `WitnessChecks` bus. Before, only non-hiding binary BabyBear/KoalaBear D4/W16 Poseidon2 leaves
+  (and WHIR D2/D4 base queries) did; Goldilocks D2 and D3, Poseidon1, the W24 shapes, salted
+  leaves and arity-4 leaves used the ALU `mul_add` chain.
+- The policy applies to `verify_batch_circuit` (any field, salted or not, any permutation role),
+  `verify_whir_base_batch_circuit`, the salted path of
+  `verify_batch_circuit_from_extension_opened` (flattened extension values plus salt) and the
+  arity-4 leaf digest behind `verify_batch_circuit_arity4`. `D = 1` permutations, which read each
+  lifted base value as its own lane, and `EF = F` are unchanged.
+- These entry points now need `enable_recompose` whenever `D > 1` and return
+  `RecomposeCoeffLookupsUnavailable` without it. Every recursion backend already enables the
+  table and proves its `recompose/coeff` rows. A packed limb costs one `recompose/coeff` row
+  instead of `D` ALU `mul_add` rows, and a partial-chunk carry is unpacked through the same
+  table, so affected circuits have fewer ALU rows, more recompose rows and different
+  preprocessed columns (and therefore verifying keys). In WP9's two-layer gate at lrup's
+  parameters, layer 1 goes from 133,046 ALU / 279 `recompose/coeff` rows to 125,878 / 4,375 and
+  layer 2 from 262,803 / 2,090 to 203,457 / 29,879 (recompose degree bits 9 → 13 and 12 → 15;
+  Poseidon2 rows unchanged, layer 2 gains one leaf permutation per query, 37,523 → 37,680). One
+  run on a shared machine: layer 2 proves in 39.4 s instead of 22.4 s, peak RSS 1,504 MiB
+  instead of 1,463 MiB.
+- Tests: `recursion/tests/mmcs_leaf_coeff_binding.rs` (own `[[test]]` target), a regression
+  test that leaf packing binds each base coefficient. At Goldilocks D2/W8 (binary and salted),
+  D2/W16 (arity 4) and D3/W12 (binary and salted, proved with the D3 Poseidon2 prover of WP4)
+  the honest row proves and verifies, while a witness that changes two coefficients of one limb
+  but keeps the limb is refused by the runner, and a trace whose downstream reader sees such
+  values does not verify. `mmcs_leaf_hash_binding.rs` (doc, salted leaves now coefficient-bound,
+  fail-closed without the table), `arity4_leaf_hash_binding.rs`, `arity4_mmcs_bus_balance.rs`
+  (registers the `recompose/coeff` table), `zk_hiding_mmcs.rs` (the salt mutation edits the
+  `recompose/coeff` row) and the WHIR packing unit tests (the public route packs like WHIR for
+  every family) follow the new policy.
+
+**Why.** The opened values feed the FRI reduction coefficient by coefficient, so the leaf hash
+should bind each one individually, for every field and leaf shape. Goldilocks D3/W12 needs this,
+and tying the rule to the packed degree alone replaces a per-field, per-role allow list.
+
+**Upstreamable.** Yes. The change is generic and adds no table. It changes circuit shapes, and so
+verifying keys and fixed-key artifacts, for the geometries listed above.

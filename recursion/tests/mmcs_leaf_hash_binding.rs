@@ -1,10 +1,12 @@
 //! Bus-binding regression for the MMCS leaf-hash absorb.
 //!
 //! `verify_batch_circuit` packs each leaf's opened base-field coefficients into extension
-//! limbs before absorbing them into the sponge. Eligible non-hiding binary D4/W16 Poseidon2
-//! leaves use the `recompose/coeff` table, which publishes each coefficient on the
-//! `WitnessChecks` bus and exposes coefficient identity in preprocessed metadata. Excluded
-//! routes retain the legacy ALU lowering, including hiding-MMCS salts.
+//! limbs before absorbing them into the sponge. Whenever the permutation absorbs extension limbs
+//! (`d() == EF::DIMENSION > 1`, every field), the leaf, including a hiding MMCS's salt, is packed
+//! with the `recompose/coeff` table, which publishes each coefficient on the `WitnessChecks` bus
+//! and exposes coefficient identity in preprocessed metadata. A `D = 1` permutation absorbs the
+//! lifted values directly and packs nothing. Goldilocks D2/D3 and arity-4 leaves are covered by
+//! `mmcs_leaf_coeff_binding.rs`.
 
 use p3_baby_bear::{BabyBear, default_babybear_poseidon2_16};
 use p3_circuit::ops::{Op, Poseidon2Config, generate_poseidon2_trace, generate_recompose_trace};
@@ -410,21 +412,48 @@ fn partial_chunk_carry_over_coefficients_use_coefficient_bound_recompose() {
 }
 
 #[test]
-fn salted_leaf_hash_keeps_the_legacy_alu_lowering() {
+fn salted_leaf_hash_uses_coefficient_bound_recompose() {
     let circuit = build_leaf_hash_circuit_with_salts(LEAF_WIDTH);
     let perm_inputs = permutation_input_witnesses(&circuit);
     assert!(
-        perm_inputs
+        !perm_inputs
             .iter()
-            .any(|&wid| { matches!(circuit.ops[writer_position(&circuit, wid)], Op::Alu { .. }) }),
-        "hiding leaves must keep their ALU packing"
+            .any(|&wid| matches!(circuit.ops[writer_position(&circuit, wid)], Op::Alu { .. })),
+        "no salted leaf limb may be packed by the ALU chain"
     );
+    // `LEAF_WIDTH + 2` coefficients: one full rate chunk, then the salt in a partial chunk.
+    let leaf_inputs = leaf_hash_input_witnesses(&circuit, 2, CFG.rate_ext());
     assert!(
-        !circuit
-            .ops
-            .iter()
-            .any(|op| is_npo_type(op, "recompose/coeff")),
-        "hiding leaves must not select coefficient-bound packing"
+        leaf_inputs.iter().all(|&wid| {
+            is_exact_npo_type(
+                &circuit.ops[writer_position(&circuit, wid)],
+                "recompose/coeff",
+            )
+        }),
+        "every salted leaf limb must be written by an exact coefficient-bound row"
+    );
+    // The salt coefficients themselves are inputs of coefficient-bound rows.
+    let salt_wids = &circuit.public_rows[circuit.public_rows.len() - 2..];
+    for salt in salt_wids {
+        assert!(
+            circuit.ops.iter().any(|op| matches!(
+                op,
+                Op::NonPrimitiveOpWithExecutor { inputs, .. }
+                    if is_exact_npo_type(op, "recompose/coeff")
+                        && inputs.iter().flatten().any(|input| input == salt)
+            )),
+            "salt coefficient {salt:?} must be packed by a coefficient-bound row"
+        );
+    }
+}
+
+#[test]
+fn salted_leaf_hash_fails_closed_without_coefficient_table() {
+    let error = build_leaf_hash_circuit_with_options(LEAF_WIDTH, true, false)
+        .expect_err("salted coefficient-bound packing requires the enabled table");
+    assert!(
+        matches!(error, CircuitBuilderError::RecomposeCoeffLookupsUnavailable),
+        "salted leaves must not silently fall back to ALU packing: {error:?}"
     );
 }
 
