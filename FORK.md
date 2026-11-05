@@ -421,3 +421,78 @@ Plonky3 code lrup uses, so a divergence fails here before it fails in recursion.
 
 **Upstreamable.** The tests could be, together with WP1-WP5; the lrup cross-reference in the
 known-answer comments would be dropped.
+
+### WP10: salted hiding config at D3
+
+**What changed.**
+
+- `circuit-prover/src/config.rs`: `goldilocks_d3_w12_zk(params, os_entropy)`, the salted hiding
+  counterpart of `goldilocks_d3_w12()` (same field, cubic challenge field, reference W12
+  permutation, `PaddingFreeSponge<_, 12, 6, 6>`, `TruncatedPermutation<_, 2, 6, 12>`, cap height
+  0, `DuplexChallenger<_, _, 12, 6>`, `log_final_poly_len` 0, no commit, batch, lookup or
+  out-of-domain grinding). It mirrors the KoalaBear D4 salted factory
+  (`recursion/src/builtin_config/fri.rs`):
+  - `GoldilocksD3W12HidingMmcs`: `MerkleTreeHidingMmcs` over the W12 sponge and compression,
+    with `GOLDILOCKS_D3_W12_ZK_SALT_ELEMS` = 4 Goldilocks salt elements (256 bits) per leaf. It is
+    the input MMCS and, through `ExtensionMmcs`, the FRI commit-phase MMCS, so every commitment
+    is salted.
+  - `GoldilocksD3W12ZkPcs`: `HidingFriPcs` (random codewords, trace randomization to degree
+    `2N`, quotient-chunk masks, a randomization polynomial) over those MMCSs;
+    `GoldilocksD3W12ZkConfig` the `StarkConfig`.
+  - Randomness: the input salts, the FRI salts and the PCS masks come from three
+    `GoldilocksD3W12ZkRng` (`StdRng`, ChaCha12) generators, each seeded by its own draw from the
+    caller's OS entropy source (`rand::rngs::SysRng` in a `std` caller; this crate is `no_std`
+    and its `rand` has no OS-entropy feature). There is no constructor that takes a seed.
+  - `GoldilocksD3W12ZkParams` (log blowup, queries, query PoW bits, maximum log arity, random
+    codewords) with `outer_wrap()` (rate 1/8, 128 queries, 22-bit query PoW, arity up to 8,
+    3 random codewords: 128.2 proven bits under unique decoding) and `test()`. `validate()`
+    refuses fewer random codewords than the extension degree. `hiding_budget()` is p3-fri's
+    per-matrix budget at two opening points, `2 * (queries + 3 * 2)`, and `min_trace_height()` the
+    power of two above it (512 rows at `outer_wrap()`). `pad_table_packing` raises a
+    `TablePacking`'s minimum height to it; `check_table_packing` refuses a packing below it.
+    `HidingFriPcs` itself refuses any shorter table at commitment, opening and verification.
+  - `GoldilocksD3W12ZkError`, and unit tests: the parameter checks and budget, the packing
+    helpers, three 32-byte seeds drawn per config, a failing entropy source reported as an error.
+- The circuit's preprocessed commitment is salted from the input MMCS's stream at preparation.
+  Its contents are public (p3-fri pads it with zero rows, not random ones), and the verifier takes
+  it from the trusted preparation (`CircuitVerifier`), so it is not recomputable from the circuit
+  alone. A fixed verifying-key artifact for a hiding circuit (7.5) needs a deterministic
+  preprocessing commitment.
+- `recursion/tests/common/goldilocks_d3_toy.rs`: the toy AIRs, the inner proof, layer 1 and the
+  layer-2 builder of `goldilocks_d3_e2e.rs`, moved out unchanged (now `pub`) so both D3 targets
+  share them. `goldilocks_d3_e2e.rs` keeps its tests and measurements.
+- `recursion/tests/goldilocks_d3_zk.rs` (new test target `goldilocks_d3_zk`): the layer-2 circuit
+  of WP9 (inner proof, layer 1 proved without hiding, layer 2 built by the D3 backend) is proved
+  under the hiding config, with the D3 tables (shared W12 Poseidon2, `recompose/coeff`) and
+  tables padded to the hiding budget, and verified natively. Every config is seeded from
+  `/dev/urandom`. Tests:
+  - the proof verifies and has the hiding structure (randomization commitment and openings,
+    three random-codeword values per private opening point, salts, doubled degrees);
+  - two proofs of the same statement and witness from one preparation, and a third from a
+    separately seeded config, share no commitment root, Merkle sibling digest, salt (input batch
+    or FRI), out-of-domain value, random-codeword opening, FRI sibling value, final polynomial or
+    query opening, compared value by value over the whole proof structure. Excluded as public:
+    the preprocessed commitment and the preprocessed round's openings, public values, table
+    shape metadata and proof-of-work nonces. Within a proof the input and FRI salts never meet;
+    the separately seeded config's preprocessed commitment differs;
+  - a table below the hiding budget is refused (packing check; the PCS at preprocessing with an
+    unpadded packing), the padded packing proves, and two random codewords are refused;
+  - a changed salt (every input round, first and last FRI layer) and a changed opened value
+    (main trace of every table, quotient chunk, randomization polynomial, random-codeword opening
+    of every private round, query row, FRI sibling value) are rejected by the native verifier;
+  - the outer-wrap parameters reach 128 proven bits;
+  - an ignored measurement, `hiding_layer2_at_outer_parameters`. One single-threaded run on a
+    shared machine, layer 2 over an inner proof at lrup's parameters and layer 1 at
+    `recursion_layer_params()`: non-hiding at 2/157/22, prove 39.6 s, peak RSS 1,497 MiB,
+    1,253,968 bytes; hiding at `outer_wrap()` (3/128/22), prove 136.3 s, 6,650 MiB,
+    1,651,079 bytes; hiding at 2/157/22, prove 71.6 s, 3,562 MiB, 1,934,519 bytes. Hiding pads
+    the two small tables to 512 rows and doubles every committed degree (degree bits
+    `[9, 6, 16, 16, 15]` become `[10, 10, 17, 17, 16]`). Pruned Merkle paths make the byte size
+    vary slightly from proof to proof.
+
+**Why.** `--zk` wraps the root proof in one hiding proof (plan Phase 6), which must be hiding on
+its own: every commitment salted, every revealed evaluation masked, randomness from the OS, with
+the hiding budget covering every opening. The library's salted mode existed only for KoalaBear D4.
+
+**Upstreamable.** The factory could be, with WP1-WP5. A built-in suite (persisted verifying keys)
+is still to come.

@@ -17,10 +17,10 @@ use p3_commit::ExtensionMmcs;
 use p3_dft::Radix2DitParallel;
 use p3_field::extension::{BinomialExtensionField, CubicTrinomialExtensionField};
 use p3_field::{Field, PrimeCharacteristicRing, PrimeField64, TwoAdicField};
-use p3_fri::{FriParameters, TwoAdicFriPcs};
+use p3_fri::{FriParameters, HidingFriPcs, TwoAdicFriPcs};
 use p3_goldilocks::{Goldilocks, Poseidon2Goldilocks, default_goldilocks_poseidon2_12};
 use p3_koala_bear::{KoalaBear, Poseidon2KoalaBear, default_koalabear_poseidon2_16};
-use p3_merkle_tree::MerkleTreeMmcs;
+use p3_merkle_tree::{MerkleTreeHidingMmcs, MerkleTreeMmcs};
 use p3_symmetric::{CryptographicPermutation, PaddingFreeSponge, TruncatedPermutation};
 use p3_uni_stark::StarkConfig;
 
@@ -281,6 +281,303 @@ pub type GoldilocksD3W12Config = StarkConfig<
     DuplexChallenger<Goldilocks, Poseidon2Goldilocks<12>, 12, 6>,
 >;
 
+// ---------------------------------------------------------------------------------------------
+// Goldilocks D3 / W12: salted hiding configuration
+// ---------------------------------------------------------------------------------------------
+
+/// Salt elements appended to every Merkle leaf of [`GoldilocksD3W12ZkConfig`]: four Goldilocks
+/// elements, 256 bits of salt per leaf.
+pub const GOLDILOCKS_D3_W12_ZK_SALT_ELEMS: usize = 4;
+
+/// Extension degree of [`GoldilocksD3W12ZkConfig`]'s challenge field.
+const GOLDILOCKS_D3_W12_ZK_EXT_DEGREE: usize = 3;
+
+/// The most points a batch-STARK proof opens one committed matrix at: `zeta` and its next-row
+/// shift (main, permutation and preprocessed traces). Quotient chunks and the randomization
+/// polynomial are opened at `zeta` only.
+pub const BATCH_STARK_MAX_OPENING_POINTS: usize = 2;
+
+/// Generator behind every salt and mask of [`GoldilocksD3W12ZkConfig`] (ChaCha12, a
+/// [`rand::CryptoRng`]). Each of the three streams is seeded separately from the caller's OS
+/// entropy source by [`goldilocks_d3_w12_zk`].
+pub type GoldilocksD3W12ZkRng = rand::rngs::StdRng;
+
+/// Salted binary Merkle MMCS of [`GoldilocksD3W12ZkConfig`]: the leaves and nodes of
+/// [`GoldilocksD3W12ValMmcs`], with [`GOLDILOCKS_D3_W12_ZK_SALT_ELEMS`] random elements appended
+/// to every leaf row before hashing.
+pub type GoldilocksD3W12HidingMmcs = MerkleTreeHidingMmcs<
+    <Goldilocks as Field>::Packing,
+    <Goldilocks as Field>::Packing,
+    PaddingFreeSponge<Poseidon2Goldilocks<12>, 12, 6, 6>,
+    TruncatedPermutation<Poseidon2Goldilocks<12>, COMPRESS_ARITY, 6, 12>,
+    GoldilocksD3W12ZkRng,
+    2,
+    6,
+    GOLDILOCKS_D3_W12_ZK_SALT_ELEMS,
+>;
+
+/// Hiding FRI PCS of [`GoldilocksD3W12ZkConfig`]: random codewords and trace/quotient masks over
+/// salted input and commit-phase MMCSs.
+pub type GoldilocksD3W12ZkPcs = HidingFriPcs<
+    Goldilocks,
+    Radix2DitParallel<Goldilocks>,
+    GoldilocksD3W12HidingMmcs,
+    ExtensionMmcs<Goldilocks, CubicTrinomialExtensionField<Goldilocks>, GoldilocksD3W12HidingMmcs>,
+    GoldilocksD3W12ZkRng,
+>;
+
+/// The salted hiding counterpart of [`GoldilocksD3W12Config`]: same field, challenge field,
+/// permutation, sponge, compression, cap height and challenger.
+pub type GoldilocksD3W12ZkConfig = StarkConfig<
+    GoldilocksD3W12ZkPcs,
+    CubicTrinomialExtensionField<Goldilocks>,
+    DuplexChallenger<Goldilocks, Poseidon2Goldilocks<12>, 12, 6>,
+>;
+
+/// A [`GoldilocksD3W12ZkParams`] or an entropy source that [`goldilocks_d3_w12_zk`] refuses.
+#[derive(Clone, Debug, PartialEq, Eq, thiserror::Error)]
+pub enum GoldilocksD3W12ZkError {
+    /// Fewer random codewords than the challenge field's degree: the extension-field FRI batch
+    /// combination would not be uniformly masked.
+    #[error("hiding FRI needs at least {required} random codewords, got {got}")]
+    InsufficientRandomCodewords { required: usize, got: usize },
+    /// A FRI parameter is out of range.
+    #[error("invalid hiding FRI parameter: {0}")]
+    InvalidFri(&'static str),
+    /// The hiding budget does not fit in `usize`.
+    #[error("hiding budget overflows")]
+    BudgetOverflow,
+    /// A table packing whose minimum trace height is below the hiding budget.
+    #[error("minimum trace height {got} is below the hiding budget's {required} rows")]
+    TableBelowHidingBudget { required: usize, got: usize },
+    /// The entropy source failed to produce a seed.
+    #[error("the OS entropy source failed: {0}")]
+    Entropy(alloc::string::String),
+}
+
+/// FRI and hiding parameters of [`GoldilocksD3W12ZkConfig`]. Everything else is fixed to the shape
+/// of [`goldilocks_d3_w12`]: `log_final_poly_len` 0, cap height 0, no commit or batch proof of
+/// work, no lookup or out-of-domain grinding.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct GoldilocksD3W12ZkParams {
+    pub log_blowup: usize,
+    pub num_queries: usize,
+    pub query_pow_bits: usize,
+    pub max_log_arity: usize,
+    /// Random codewords appended to every private committed matrix (at least 3).
+    pub num_random_codewords: usize,
+}
+
+impl GoldilocksD3W12ZkParams {
+    /// The proposed outer-wrap parameters: rate 1/8, 128 queries and 22 bits of query grinding,
+    /// folding arity up to 8, three random codewords.
+    ///
+    /// Hiding does not change the FRI rate: the hiding PCS doubles every committed polynomial's
+    /// degree bound (`2N` for a trace of height `N`) and then applies the blowup to that, so the
+    /// committed codewords have rate exactly `2^-log_blowup`. Under unique decoding each query
+    /// gives `-log2((1 + 1/8) / 2) = 0.830` bits: `128 * 0.830 + 22 = 128.2` proven bits. The
+    /// hiding budget is `2 * (128 + 3 * 2) = 268` values, so every table needs at least 512 rows.
+    pub const fn outer_wrap() -> Self {
+        Self {
+            log_blowup: 3,
+            num_queries: 128,
+            query_pow_bits: 22,
+            max_log_arity: 3,
+            num_random_codewords: GOLDILOCKS_D3_W12_ZK_EXT_DEGREE,
+        }
+    }
+
+    /// Cheap parameters in the same shape for fast tests (rate 1/2, 8 queries, 4 bits of
+    /// grinding). Hiding holds (the budget is enforced as usual), soundness does not.
+    pub const fn test() -> Self {
+        Self {
+            log_blowup: 1,
+            num_queries: 8,
+            query_pow_bits: 4,
+            max_log_arity: 3,
+            num_random_codewords: GOLDILOCKS_D3_W12_ZK_EXT_DEGREE,
+        }
+    }
+
+    /// Refuse parameters the hiding PCS cannot use safely.
+    pub const fn validate(&self) -> Result<(), GoldilocksD3W12ZkError> {
+        if self.num_random_codewords < GOLDILOCKS_D3_W12_ZK_EXT_DEGREE {
+            return Err(GoldilocksD3W12ZkError::InsufficientRandomCodewords {
+                required: GOLDILOCKS_D3_W12_ZK_EXT_DEGREE,
+                got: self.num_random_codewords,
+            });
+        }
+        if self.log_blowup == 0 {
+            return Err(GoldilocksD3W12ZkError::InvalidFri(
+                "log_blowup must be at least 1",
+            ));
+        }
+        if self.num_queries == 0 {
+            return Err(GoldilocksD3W12ZkError::InvalidFri(
+                "num_queries must be positive",
+            ));
+        }
+        if self.max_log_arity == 0 {
+            return Err(GoldilocksD3W12ZkError::InvalidFri(
+                "max_log_arity must be at least 1",
+            ));
+        }
+        match self.min_trace_height() {
+            Some(_) => Ok(()),
+            None => Err(GoldilocksD3W12ZkError::BudgetOverflow),
+        }
+    }
+
+    /// The hiding PCS's per-matrix budget at [`BATCH_STARK_MAX_OPENING_POINTS`] points:
+    /// `2 * (num_queries + 3 * 2)` (p3-fri `HidingFriPcs::hiding_budget`). A committed matrix of
+    /// height `N` carries `N` independent mask values per column, and must have `N` at least this.
+    pub const fn hiding_budget(&self) -> Option<usize> {
+        let Some(points) =
+            GOLDILOCKS_D3_W12_ZK_EXT_DEGREE.checked_mul(BATCH_STARK_MAX_OPENING_POINTS)
+        else {
+            return None;
+        };
+        let Some(disclosed) = self.num_queries.checked_add(points) else {
+            return None;
+        };
+        disclosed.checked_mul(2)
+    }
+
+    /// The smallest power-of-two table height that covers [`Self::hiding_budget`].
+    pub const fn min_trace_height(&self) -> Option<usize> {
+        match self.hiding_budget() {
+            Some(budget) => budget.checked_next_power_of_two(),
+            None => None,
+        }
+    }
+
+    /// `packing` with its minimum trace height raised to [`Self::min_trace_height`], so every
+    /// table is padded up to the hiding budget. Per-table minimum heights below the new floor make
+    /// the packing invalid, and the prover then refuses it.
+    pub fn pad_table_packing(
+        &self,
+        packing: crate::TablePacking,
+    ) -> Result<crate::TablePacking, GoldilocksD3W12ZkError> {
+        let required = self
+            .min_trace_height()
+            .ok_or(GoldilocksD3W12ZkError::BudgetOverflow)?;
+        let floor = packing.min_trace_height().max(required);
+        Ok(packing.with_min_trace_height(floor))
+    }
+
+    /// Refuse a packing that would let a table fall below the hiding budget. (The hiding PCS
+    /// refuses such a table anyway, at commitment, opening and verification; this fails earlier.)
+    pub fn check_table_packing(
+        &self,
+        packing: &crate::TablePacking,
+    ) -> Result<(), GoldilocksD3W12ZkError> {
+        let required = self
+            .min_trace_height()
+            .ok_or(GoldilocksD3W12ZkError::BudgetOverflow)?;
+        let floors = [
+            Some(packing.min_trace_height()),
+            packing.alu_min_height(),
+            packing.public_min_height(),
+            packing.const_min_height(),
+        ];
+        let lowest = floors
+            .into_iter()
+            .flatten()
+            .chain(packing.npo_min_heights().map(|(_, height)| height))
+            .min()
+            .unwrap_or(0);
+        if lowest < required {
+            return Err(GoldilocksD3W12ZkError::TableBelowHidingBudget {
+                required,
+                got: lowest,
+            });
+        }
+        Ok(())
+    }
+}
+
+/// Creates the salted hiding Goldilocks D3 / W12 configuration.
+///
+/// Every commitment is a salted Merkle tree ([`GoldilocksD3W12HidingMmcs`]), the FRI
+/// commit-phase commitments included, and the PCS is p3-fri's [`HidingFriPcs`]: random codewords,
+/// trace randomization (each committed trace of height `N` becomes a degree-`2N` polynomial with
+/// `N` fresh random values per column), quotient-chunk masking and a randomization polynomial.
+///
+/// # Randomness
+///
+/// The input MMCS's salts, the FRI MMCS's salts and the PCS's masks come from three generators
+/// ([`GoldilocksD3W12ZkRng`]), each seeded with a fresh draw from `os_entropy`, so their streams
+/// are independent. Within a stream nothing is reused: every commitment advances it, and p3-fri
+/// lets the masks of private prover data be opened only once.
+///
+/// `os_entropy` must be the operating system's generator, for example `rand::rngs::SysRng`
+/// (rand's `sys_rng` feature). This crate is `no_std` and does not enable an OS-entropy feature,
+/// so it cannot read OS entropy itself. There is deliberately no constructor that takes a seed:
+/// a predictable source makes every salt and mask reproducible and voids hiding.
+///
+/// The circuit's preprocessed commitment is salted from the input MMCS's stream as well. Its
+/// contents are public (p3-fri pads it with zero rows, not random ones), and the verifier takes it
+/// from the trusted preparation, not by recomputing it.
+///
+/// # Table heights
+///
+/// The PCS refuses any committed table shorter than [`GoldilocksD3W12ZkParams::hiding_budget`].
+/// Pad the circuit's tables with [`GoldilocksD3W12ZkParams::pad_table_packing`].
+pub fn goldilocks_d3_w12_zk<E>(
+    params: GoldilocksD3W12ZkParams,
+    os_entropy: &mut E,
+) -> Result<GoldilocksD3W12ZkConfig, GoldilocksD3W12ZkError>
+where
+    E: rand::TryCryptoRng + ?Sized,
+{
+    use alloc::string::ToString;
+    use rand::SeedableRng;
+
+    params.validate()?;
+    let mut fresh = || {
+        GoldilocksD3W12ZkRng::try_from_rng(&mut *os_entropy)
+            .map_err(|error| GoldilocksD3W12ZkError::Entropy(error.to_string()))
+    };
+    // Three separately seeded streams: input-MMCS salts, FRI-MMCS salts, PCS masks.
+    let input_salts = fresh()?;
+    let fri_salts = fresh()?;
+    let masks = fresh()?;
+
+    let perm = default_goldilocks_poseidon2_12();
+    let input_mmcs = GoldilocksD3W12HidingMmcs::new(
+        PaddingFreeSponge::new(perm.clone()),
+        TruncatedPermutation::new(perm.clone()),
+        0,
+        input_salts,
+    );
+    let fri_mmcs = GoldilocksD3W12HidingMmcs::new(
+        PaddingFreeSponge::new(perm.clone()),
+        TruncatedPermutation::new(perm.clone()),
+        0,
+        fri_salts,
+    );
+    let fri_params = FriParameters {
+        log_blowup: params.log_blowup,
+        log_final_poly_len: 0,
+        max_log_arity: params.max_log_arity,
+        num_queries: params.num_queries,
+        batch_proof_of_work_bits: 0,
+        commit_proof_of_work_bits: 0,
+        query_proof_of_work_bits: params.query_pow_bits,
+        mmcs: ExtensionMmcs::new(fri_mmcs),
+    };
+    let pcs = HidingFriPcs::new(
+        Radix2DitParallel::default(),
+        input_mmcs,
+        fri_params,
+        params.num_random_codewords,
+        masks,
+    );
+    Ok(StarkConfig::new(pcs, DuplexChallenger::new(perm))
+        .with_lookup_proof_of_work_bits(0)
+        .with_ood_proof_of_work_bits(0))
+}
+
 /// Trait bounds for STARK-compatible fields.
 pub trait StarkField: Field + PrimeCharacteristicRing + TwoAdicField + PrimeField64 {}
 
@@ -296,5 +593,147 @@ mod tests {
         let _kb: KoalaBearConfig = koala_bear();
         let _gl: GoldilocksConfig = goldilocks();
         let _gl3: GoldilocksD3W12Config = goldilocks_d3_w12();
+    }
+
+    /// An entropy source that always fails, and one that counts the bytes drawn from it.
+    struct Entropy {
+        fail: bool,
+        drawn: usize,
+        state: u64,
+    }
+
+    impl rand::TryRng for Entropy {
+        type Error = core::fmt::Error;
+
+        fn try_next_u32(&mut self) -> Result<u32, Self::Error> {
+            self.try_next_u64().map(|x| x as u32)
+        }
+
+        fn try_next_u64(&mut self) -> Result<u64, Self::Error> {
+            let mut bytes = [0u8; 8];
+            self.try_fill_bytes(&mut bytes)?;
+            Ok(u64::from_le_bytes(bytes))
+        }
+
+        fn try_fill_bytes(&mut self, dst: &mut [u8]) -> Result<(), Self::Error> {
+            if self.fail {
+                return Err(core::fmt::Error);
+            }
+            for byte in dst.iter_mut() {
+                self.state = self.state.wrapping_mul(6364136223846793005).wrapping_add(1);
+                *byte = (self.state >> 56) as u8;
+            }
+            self.drawn += dst.len();
+            Ok(())
+        }
+    }
+
+    impl rand::TryCryptoRng for Entropy {}
+
+    #[test]
+    fn goldilocks_d3_w12_zk_params_and_budget() {
+        let outer = GoldilocksD3W12ZkParams::outer_wrap();
+        outer.validate().unwrap();
+        assert_eq!(outer.hiding_budget(), Some(268));
+        assert_eq!(outer.min_trace_height(), Some(512));
+        let test = GoldilocksD3W12ZkParams::test();
+        assert_eq!(test.hiding_budget(), Some(28));
+        assert_eq!(test.min_trace_height(), Some(32));
+
+        for (params, expected) in [
+            (
+                GoldilocksD3W12ZkParams {
+                    num_random_codewords: 2,
+                    ..outer
+                },
+                GoldilocksD3W12ZkError::InsufficientRandomCodewords {
+                    required: 3,
+                    got: 2,
+                },
+            ),
+            (
+                GoldilocksD3W12ZkParams {
+                    log_blowup: 0,
+                    ..outer
+                },
+                GoldilocksD3W12ZkError::InvalidFri("log_blowup must be at least 1"),
+            ),
+            (
+                GoldilocksD3W12ZkParams {
+                    num_queries: 0,
+                    ..outer
+                },
+                GoldilocksD3W12ZkError::InvalidFri("num_queries must be positive"),
+            ),
+            (
+                GoldilocksD3W12ZkParams {
+                    num_queries: usize::MAX,
+                    ..outer
+                },
+                GoldilocksD3W12ZkError::BudgetOverflow,
+            ),
+        ] {
+            assert_eq!(params.validate(), Err(expected));
+        }
+
+        // Padding raises the floor; overrides below it are refused.
+        let packing = outer
+            .pad_table_packing(crate::TablePacking::new(1, 1))
+            .unwrap();
+        assert_eq!(packing.min_trace_height(), 512);
+        outer.check_table_packing(&packing).unwrap();
+        assert_eq!(
+            outer.check_table_packing(&crate::TablePacking::new(1, 1).with_min_trace_height(256)),
+            Err(GoldilocksD3W12ZkError::TableBelowHidingBudget {
+                required: 512,
+                got: 256,
+            })
+        );
+        let short_npo = packing.with_npo_min_height(p3_circuit::ops::NpoTypeId::recompose(), 64);
+        assert!(outer.check_table_packing(&short_npo).is_err());
+        let taller = outer
+            .pad_table_packing(crate::TablePacking::new(1, 1).with_min_trace_height(2048))
+            .unwrap();
+        assert_eq!(taller.min_trace_height(), 2048);
+    }
+
+    #[test]
+    fn goldilocks_d3_w12_zk_draws_three_seeds_and_reports_entropy_failure() {
+        let mut source = Entropy {
+            fail: false,
+            drawn: 0,
+            state: 1,
+        };
+        let _config: GoldilocksD3W12ZkConfig =
+            goldilocks_d3_w12_zk(GoldilocksD3W12ZkParams::test(), &mut source).unwrap();
+        // Three 32-byte ChaCha seeds: input salts, FRI salts, masks.
+        assert_eq!(source.drawn, 3 * 32);
+
+        let mut failing = Entropy {
+            fail: true,
+            drawn: 0,
+            state: 1,
+        };
+        assert!(matches!(
+            goldilocks_d3_w12_zk(GoldilocksD3W12ZkParams::test(), &mut failing),
+            Err(GoldilocksD3W12ZkError::Entropy(_))
+        ));
+        // Invalid parameters are refused before any entropy is drawn.
+        let mut untouched = Entropy {
+            fail: false,
+            drawn: 0,
+            state: 1,
+        };
+        assert!(
+            goldilocks_d3_w12_zk(
+                GoldilocksD3W12ZkParams {
+                    num_random_codewords: 0,
+                    ..GoldilocksD3W12ZkParams::test()
+                },
+                &mut untouched
+            )
+            .is_err()
+        );
+        assert_eq!(untouched.drawn, 0);
     }
 }
