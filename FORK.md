@@ -496,3 +496,27 @@ the hiding budget covering every opening. The library's salted mode existed only
 
 **Upstreamable.** The factory could be, with WP1-WP5. A built-in suite (persisted verifying keys)
 is still to come.
+
+### WP11: read access to a trusted child's statement targets
+
+**What changed.**
+
+- `circuit/src/builder/circuit_builder.rs`: `VerifiedStatementTargets::schema()` and
+  `VerifiedStatementTargets::base_targets()`, read-only accessors. Reading does not consume the
+  capability; installing it is unchanged. Unit test
+  `verified_statement_targets_expose_their_targets` (the accessors return the targets and schema
+  the capability was built from, and a parent can export its own statement computed from them).
+- `recursion/src/prepared/mod.rs`: `TrustedChildStatementLayout::batch` is public (it was
+  `pub(crate)`), so a caller of the public `TrustedPcsRecursionBackend` methods can ask
+  `verified_statement_targets` for a batch child's statement targets.
+
+**Why.** `TrustedPreparedAggregation` composes two trusted children in one of two fixed ways
+(ordered concatenation or a state transition). A tree whose nodes enforce their own relations
+between the children's statements (equalities, sums, a hash of two child digests) builds its node
+circuit from the same public trait methods (`build_trusted_batch_verifier_circuit`,
+`constrain_trusted_preprocessing`, `verified_statement_targets`,
+`set_private_data_for_trusted_batch`) and needs the verified targets to constrain them.
+Nothing else changes: the targets are still the exact AIR-public targets the trusted verifier
+consumed, and the child's preprocessing commitment is still pinned the same way.
+
+**Upstreamable.** Yes; generic and additive.

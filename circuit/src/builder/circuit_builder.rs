@@ -89,6 +89,20 @@ impl<F: Field> VerifiedStatementTargets<F> {
         })
     }
 
+    /// The child statement schema these targets encode.
+    pub const fn schema(&self) -> &StatementSchema {
+        &self.schema
+    }
+
+    /// The verified targets, in the schema's canonical flattened order (one base element each).
+    ///
+    /// Reading them does not consume the capability. A parent relation that does not forward
+    /// the child statement verbatim can constrain or combine these targets and export its own
+    /// statement with [`CircuitBuilder::set_statement_exports`].
+    pub fn base_targets(&self) -> &[ExprId] {
+        &self.base_targets
+    }
+
     /// Consume this capability to install its one Statement sink into its originating builder.
     pub fn install<BF>(self, builder: &mut CircuitBuilder<F>) -> Result<(), CircuitBuilderError>
     where
@@ -4632,6 +4646,36 @@ mod proptests {
                 crate::StatementField::Base,
             ]
         );
+    }
+
+    /// The accessors return exactly the targets and schema the capability was built from.
+    #[test]
+    fn verified_statement_targets_expose_their_targets() {
+        type Ext4 = BinomialExtensionField<BabyBear, 4>;
+
+        let mut builder = CircuitBuilder::<Ext4>::new();
+        let targets = (0..3).map(|_| builder.public_input()).collect::<Vec<_>>();
+        let schema = crate::StatementSchema::try_new(vec![
+            crate::StatementField::Base,
+            crate::StatementField::Extension { degree: 2 },
+        ])
+        .unwrap();
+
+        // SAFETY: the test passes the exact existing targets represented by the supplied schema.
+        let verified = unsafe {
+            VerifiedStatementTargets::new_unchecked(&builder, schema.clone(), targets.clone())
+        }
+        .unwrap();
+        assert_eq!(verified.schema(), &schema);
+        assert_eq!(verified.base_targets(), targets.as_slice());
+
+        // A parent relation may read the targets and export its own statement instead.
+        let sum = builder.add(verified.base_targets()[0], verified.base_targets()[1]);
+        let exported = builder
+            .set_statement_exports::<BabyBear>(&[crate::StatementExport::Base(sum)])
+            .unwrap();
+        let circuit = builder.build().unwrap();
+        assert_eq!(circuit.statement_schema(), Some(&exported));
     }
 
     #[test]

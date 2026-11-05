@@ -101,7 +101,9 @@ impl TrustedChildStatementLayout {
         })
     }
 
-    pub(crate) fn batch(layout: &StatementLayout) -> Self {
+    /// The statement layout of a batch child, from its verifier's retained descriptor
+    /// ([`CircuitVerifier::statement_layout`](p3_circuit_prover::CircuitVerifier::statement_layout)).
+    pub fn batch(layout: &StatementLayout) -> Self {
         Self {
             kind: TrustedChildStatementKind::Batch,
             schema: layout.schema().clone(),
