@@ -79,10 +79,12 @@ fn digest_limbs(digest: &[F]) -> Vec<EF> {
         .collect()
 }
 
-/// Commit `mats` natively, then check every opening with a `verify_batch_circuit` circuit.
+/// Commit `mats` natively, then check every opening natively and with a
+/// `verify_batch_circuit` circuit.
 ///
 /// The root, the opened rows and the direction bits are public inputs; the Merkle siblings
-/// are private data. Every opening must run, and each one must fail with its root changed.
+/// are private data. Every honest opening must run, and each one must fail with its root, an
+/// opened value (first and last) or a Merkle sibling (first and last level) changed.
 fn check_all_openings(mats: Vec<RowMajorMatrix<F>>) {
     let mmcs = native_mmcs();
     let dimensions: Vec<_> = mats.iter().map(Matrix::dimensions).collect();
@@ -94,6 +96,8 @@ fn check_all_openings(mats: Vec<RowMajorMatrix<F>>) {
 
     for index in 0..max_height {
         let opening = mmcs.open_batch(index, &prover_data);
+        mmcs.verify_batch(&commitment, &dimensions, index, (&opening).into())
+            .unwrap_or_else(|e| panic!("index {index}: native opening rejected: {e:?}"));
 
         let mut circuit = setup_circuit();
         let opened: Vec<Vec<_>> = opening
@@ -131,10 +135,40 @@ fn check_all_openings(mats: Vec<RowMajorMatrix<F>>) {
             .collect();
         assert_eq!(mmcs_ops.len(), siblings.len());
 
-        for tamper in [false, true] {
+        #[derive(Debug)]
+        enum Tamper {
+            None,
+            Root,
+            Opened(usize),
+            Sibling(usize, usize),
+        }
+        let last_level = siblings.len().saturating_sub(1);
+        let mut tampers = vec![
+            Tamper::None,
+            Tamper::Root,
+            Tamper::Opened(0),
+            Tamper::Opened(root_at - log_max_height - 1),
+        ];
+        if !siblings.is_empty() {
+            tampers.extend([
+                Tamper::Sibling(0, 0),
+                Tamper::Sibling(last_level, DIGEST - 1),
+            ]);
+        }
+        for tamper in tampers {
             let mut inputs = public_inputs.clone();
-            if tamper {
-                inputs[root_at] += EF::ONE;
+            let mut siblings = siblings.clone();
+            match tamper {
+                Tamper::None => {}
+                Tamper::Root => inputs[root_at] += EF::ONE,
+                Tamper::Opened(k) => inputs[k] += EF::ONE,
+                Tamper::Sibling(level, coefficient) => {
+                    let limb = &mut siblings[level][coefficient / D];
+                    let mut coeffs =
+                        BasedVectorSpace::<F>::as_basis_coefficients_slice(limb).to_vec();
+                    coeffs[coefficient % D] += F::ONE;
+                    *limb = EF::from_basis_coefficients_slice(&coeffs).unwrap();
+                }
             }
             let mut runner = circuit.runner();
             runner.set_public_inputs(&inputs).unwrap();
@@ -144,13 +178,13 @@ fn check_all_openings(mats: Vec<RowMajorMatrix<F>>) {
                     .unwrap();
             }
             let result = runner.run();
-            if tamper {
+            if matches!(tamper, Tamper::None) {
+                result.unwrap_or_else(|e| panic!("index {index}: circuit disagrees: {e:?}"));
+            } else {
                 assert!(
                     result.is_err(),
-                    "index {index}: a wrong root must be rejected"
+                    "index {index}: {tamper:?} must be rejected"
                 );
-            } else {
-                result.unwrap_or_else(|e| panic!("index {index}: circuit disagrees: {e:?}"));
             }
         }
     }
@@ -304,58 +338,159 @@ fn challenger_transcript_matches_native_duplex_challenger() {
     );
 }
 
-/// The native permutation is p3-goldilocks' reference instance: its known answer on
-/// `[0, 1, ..., 11]` (`test_default_goldilocks_poseidon2_width_12`; lrup's
-/// `poseidon_perm_known_answer`), and the circuit permutation reproduces it.
+/// `p - 1`, the largest canonical Goldilocks element.
+const P_MINUS_1: u64 = 0xFFFF_FFFF_0000_0000;
+
+/// Known answers of `default_goldilocks_poseidon2_12()` on the four inputs of lrup's
+/// `poseidon_perm_known_answer` (lrup-backend-p3 `config.rs`; lrup's `poseidon_perm()` is that
+/// reference permutation), as `(input, output)`. lrup pins the outputs of the first two; the
+/// other two were computed with the same reference permutation. `[0, 1, ..., 11]` is also
+/// p3-goldilocks' own `test_default_goldilocks_poseidon2_width_12` vector. The W12 AIR trace
+/// is pinned to the same literals in `poseidon2-circuit-air` (`goldilocks_d3_width12`).
+const KAT: [([u64; WIDTH], [u64; WIDTH]); 4] = [
+    (
+        [0; WIDTH],
+        [
+            0x5b31a8b9799ff836,
+            0xe385174fe60f4b08,
+            0xe82c6be88d50767c,
+            0x2778f3b6a18981e2,
+            0xdeebf402c2a98074,
+            0x7c963653f27a1734,
+            0x0f46bb6190c980e7,
+            0x49828ccc24482bf3,
+            0xd73a07cf7eda8691,
+            0xab9ca371bae24a24,
+            0x75f7223257cb0b1d,
+            0x9703d4dc4a9dcbf6,
+        ],
+    ),
+    (
+        [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+        [
+            0xf292ab67c0f14b03,
+            0x0a32f1b37656544c,
+            0x053c61ab895498de,
+            0x02ff92e55b196ffb,
+            0x58176e8f6f58cab2,
+            0xb0aa1206e7aec0f8,
+            0xe90c13f3dce83ca4,
+            0xf4da15333edf39c2,
+            0x23b701c053c2ca6c,
+            0xd233d593dcdfbf58,
+            0x4effa5f9516fb52e,
+            0x0aaf4489f1f40166,
+        ],
+    ),
+    (
+        [P_MINUS_1; WIDTH],
+        [
+            0x86f498c3f6f8c30a,
+            0xb9c1930740ce3e3f,
+            0xf38d22f1852fbb43,
+            0xf56e2de37c6f1261,
+            0xe8e6c9350180fba7,
+            0xdc389fa621dbad0c,
+            0x5ed1d3754c149bb3,
+            0xb151306f2c45d95d,
+            0xd0491b449c1d2812,
+            0x5fe3fcb315c0cee8,
+            0x13199f45c406f769,
+            0x9c7d84e25ded814c,
+        ],
+    ),
+    (
+        [
+            0x4C52_5550,
+            0x0123_4567_89AB_CDEF,
+            0xFEDC_BA98_7654_3210,
+            1,
+            P_MINUS_1,
+            2,
+            0xDEAD_BEEF,
+            0x8000_0000_0000_0000,
+            0x0000_0001_0000_0000,
+            0xFFFF_FFFE_FFFF_FFFF,
+            7,
+            0x5555_5555_5555_5555,
+        ],
+        [
+            0xa5477ce5e959c326,
+            0xd703c3b8bfc7ef6f,
+            0xf6c05ec06abc129b,
+            0xdc0d05d40a0b4cfd,
+            0x114f366e8f9d209c,
+            0x37c4e727b115107b,
+            0xfc69b775bb1e8b15,
+            0xf1dceac2e25ceca6,
+            0xac4263d8502eba31,
+            0xe2b8b4f328f940e0,
+            0x49f540ce61e84e29,
+            0x8a68d27615c3d428,
+        ],
+    ),
+];
+
+/// The native permutation is p3-goldilocks' reference instance, the one lrup's
+/// `poseidon_perm()` returns: it reproduces every [`KAT`] literal, and so does the circuit
+/// permutation (one fresh sponge row per input, all twelve outputs connected to the literal).
+/// A circuit expecting one changed output coefficient must fail.
 #[test]
 fn permutation_known_answer_native_and_in_circuit() {
-    let input: [F; WIDTH] = core::array::from_fn(|i| F::from_u64(i as u64));
-    let expected = [
-        0xf292ab67c0f14b03,
-        0x0a32f1b37656544c,
-        0x053c61ab895498de,
-        0x02ff92e55b196ffb,
-        0x58176e8f6f58cab2,
-        0xb0aa1206e7aec0f8,
-        0xe90c13f3dce83ca4,
-        0xf4da15333edf39c2,
-        0x23b701c053c2ca6c,
-        0xd233d593dcdfbf58,
-        0x4effa5f9516fb52e,
-        0x0aaf4489f1f40166,
-    ]
-    .map(F::from_u64);
-    assert_eq!(default_goldilocks_poseidon2_12().permute(input), expected);
-
-    // In the circuit: a fresh sponge row over the four input limbs, all outputs exposed.
-    let mut circuit = setup_circuit();
-    let limbs: Vec<_> = input
-        .chunks(D)
-        .map(|c| circuit.define_const(EF::from_basis_coefficients_slice(c).unwrap()))
-        .collect();
-    let (_, outputs) = circuit
-        .add_poseidon2_perm(&p3_circuit::ops::Poseidon2PermCall {
-            config: CONFIG,
-            new_start: true,
-            merkle_path: false,
-            mmcs_bit: None,
-            mmcs_bit2: None,
-            inputs: limbs.into_iter().map(Some).collect(),
-            out_ctl: vec![true; CONFIG.rate_ext()],
-            return_all_outputs: true,
-            absorb_len: 0,
-        })
-        .expect("permutation call builds");
-    for (limb, chunk) in outputs.iter().zip(expected.chunks(D)) {
-        let want = circuit.define_const(EF::from_basis_coefficients_slice(chunk).unwrap());
-        circuit.connect(limb.expect("all outputs returned"), want);
+    let native = default_goldilocks_poseidon2_12();
+    for (input, output) in KAT {
+        assert_eq!(
+            native.permute(input.map(F::from_u64)),
+            output.map(F::from_u64),
+            "native permutation of {input:#x?}"
+        );
     }
-    circuit
-        .build()
-        .unwrap()
+
+    let build = |tamper: Option<(usize, usize)>| {
+        let mut circuit = setup_circuit();
+        for (case, (input, output)) in KAT.iter().enumerate() {
+            let limbs: Vec<_> = input
+                .map(F::from_u64)
+                .chunks(D)
+                .map(|c| circuit.define_const(EF::from_basis_coefficients_slice(c).unwrap()))
+                .collect();
+            let (_, outputs) = circuit
+                .add_poseidon2_perm(&p3_circuit::ops::Poseidon2PermCall {
+                    config: CONFIG,
+                    new_start: true,
+                    merkle_path: false,
+                    mmcs_bit: None,
+                    mmcs_bit2: None,
+                    inputs: limbs.into_iter().map(Some).collect(),
+                    out_ctl: vec![true; CONFIG.rate_ext()],
+                    return_all_outputs: true,
+                    absorb_len: 0,
+                })
+                .expect("permutation call builds");
+            let mut expected = output.map(F::from_u64);
+            if let Some((tampered_case, k)) = tamper
+                && tampered_case == case
+            {
+                expected[k] += F::ONE;
+            }
+            for (limb, chunk) in outputs.iter().zip(expected.chunks(D)) {
+                let want = circuit.define_const(EF::from_basis_coefficients_slice(chunk).unwrap());
+                circuit.connect(limb.expect("all outputs returned"), want);
+            }
+        }
+        circuit.build().unwrap()
+    };
+
+    build(None)
         .runner()
         .run()
-        .expect("circuit permutation matches the reference");
+        .expect("circuit permutation matches the known answers");
+    for (case, k) in [(0, 0), (1, 5), (2, 6), (3, 11)] {
+        assert!(
+            build(Some((case, k))).runner().run().is_err(),
+            "a wrong known answer (input {case}, output {k}) must be rejected"
+        );
+    }
 }
 
 mod proving {

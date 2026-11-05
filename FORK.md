@@ -375,3 +375,49 @@ and tying the rule to the packed degree alone replaces a per-field, per-role all
 
 **Upstreamable.** Yes. The change is generic and adds no table. It changes circuit shapes, and so
 verifying keys and fixed-key artifacts, for the geometries listed above.
+
+### WP7: D3 differential tests
+
+**What changed.** Tests only; no library code. Most of the differential suite came with WP1-WP5
+(listed there); this package audits it against the plan and closes the remaining gaps.
+
+- Constants known answers. lrup's `poseidon_perm_known_answer` (lrup's `poseidon_perm()` is
+  `default_goldilocks_poseidon2_12()`) checks four inputs: zero, `[0, 1, ..., 11]`, all `p - 1`
+  and a mixed vector. The fork pinned only `[0, 1, ..., 11]`; it now pins all four as hex
+  literals (the first two equal lrup's own literals, the other two were computed with the same
+  reference permutation):
+  - `poseidon2-circuit-air` (`goldilocks_d3_width12::known_answer_on_air_trace_and_native_permutation`):
+    the native reference permutation and the W12 AIR trace's output columns both reproduce every
+    literal, and the AIR constraints hold on those rows;
+  - `recursion/tests/goldilocks_d3_w12.rs` (`permutation_known_answer_native_and_in_circuit`):
+    the native reference and the in-circuit W12 permutation (one fresh sponge row per input,
+    all twelve outputs connected) both reproduce them, and a circuit expecting one changed
+    output coefficient fails.
+- ALU negative (`circuit-prover/src/air/alu_air.rs`, `cubic_trinomial_rejects_binomial_product`):
+  a MUL output reduced with a binomial `x^3 = W` is now checked for `W = 1` and `W = 7` (it was
+  `W = 1` only). The cubic-trinomial AIR rejects each; the binomial AIR with that `W` accepts
+  it, so the rejection comes from the reduction alone; and that binomial AIR rejects the honest
+  trinomial product.
+- MMCS (`goldilocks_d3_w12.rs`, `check_all_openings`, used by the sponge, compression and
+  mixed-height tests): every native opening is also verified with the native
+  `MerkleTreeMmcs::verify_batch`, and besides a changed root, the circuit must now reject a
+  changed opened value (first and last) and a changed Merkle sibling coefficient (first and
+  last level).
+
+**Coverage of the plan's differential tests (2.8).**
+
+| Test | Where |
+| --- | --- |
+| Constants known answers vs lrup's `poseidon_perm()` | `poseidon2-circuit-air` `goldilocks_d3_width12` (constants, AIR trace); `goldilocks_d3_w12.rs` (in-circuit; proved in `proving::permutation_sponge_and_merkle_rows_prove_and_verify`) |
+| W12 AIR trace vs native | `goldilocks_d3_width12::air_trace_matches_native_on_random_rows_and_constraints_hold` (random, sponge-chain and Merkle rows; tampered output rejected) |
+| ALU D3 assurance and negatives | `alu_air.rs`: `assurance_alu_reference_goldilocks_d3`, `cubic_trinomial_ext_mul_matches_native`, `cubic_trinomial_rejects_mutated_out`, `cubic_trinomial_rejects_binomial_product`; proved D3 batch with a tampered MUL output (WP2) |
+| Sponge vs `PaddingFreeSponge<_, 12, 6, 6>`, widths 1-13 | `goldilocks_d3_w12.rs` `sponge_matches_padding_free_sponge_for_widths_1_to_13`; proved two-row sponges (WP4) |
+| Compression vs `TruncatedPermutation`, both directions | `goldilocks_d3_w12.rs` `compression_matches_truncated_permutation_in_both_directions`; proved Merkle rows (WP4) |
+| Challenger transcript (observe, `sample`, `sample_ext`, `sample_bits`, PoW) | `goldilocks_d3_w12.rs` `challenger_transcript_matches_native_duplex_challenger` (plus a failing PoW witness); proved in `proving::challenger_table_proves_and_verifies` and `shared_challenger_table_proves_and_verifies` |
+| MMCS commit/verify | `goldilocks_d3_w12.rs` `mmcs_openings_with_mixed_heights`; leaf coefficient binding in `mmcs_leaf_coeff_binding.rs` (WP8) |
+
+**Why.** The plan's differential tests compare every D3/W12 building block with the native
+Plonky3 code lrup uses, so a divergence fails here before it fails in recursion.
+
+**Upstreamable.** The tests could be, together with WP1-WP5; the lrup cross-reference in the
+known-answer comments would be dropped.

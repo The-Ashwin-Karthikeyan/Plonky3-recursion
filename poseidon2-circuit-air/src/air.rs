@@ -3100,21 +3100,97 @@ mod test {
         const RATE_LIMBS: usize = <GoldilocksD3Width12 as Poseidon2Params>::RATE_EXT;
         const PERM_COLS: usize = p3_poseidon2_air::num_cols::<W, 7, 1, 4, 22>();
 
-        /// `test_default_goldilocks_poseidon2_width_12` in p3-goldilocks: the permutation of
-        /// `[0, 1, ..., 11]`. lrup's `poseidon_perm_known_answer` pins the same vector.
-        const KAT_OUTPUT: [u64; W] = [
-            0xf292ab67c0f14b03,
-            0x0a32f1b37656544c,
-            0x053c61ab895498de,
-            0x02ff92e55b196ffb,
-            0x58176e8f6f58cab2,
-            0xb0aa1206e7aec0f8,
-            0xe90c13f3dce83ca4,
-            0xf4da15333edf39c2,
-            0x23b701c053c2ca6c,
-            0xd233d593dcdfbf58,
-            0x4effa5f9516fb52e,
-            0x0aaf4489f1f40166,
+        /// `p - 1`, the largest canonical Goldilocks element.
+        const P_MINUS_1: u64 = 0xFFFF_FFFF_0000_0000;
+
+        /// Known answers of `default_goldilocks_poseidon2_12()` on the four inputs of lrup's
+        /// `poseidon_perm_known_answer` (lrup-backend-p3 `config.rs`), as `(input, output)`.
+        /// lrup pins the outputs of the first two; the other two were computed with the same
+        /// p3-goldilocks reference permutation. `[0, 1, ..., 11]` is also p3-goldilocks' own
+        /// `test_default_goldilocks_poseidon2_width_12` vector. The same literals are pinned for
+        /// the in-circuit permutation in `recursion/tests/goldilocks_d3_w12.rs`.
+        const KAT: [([u64; W], [u64; W]); 4] = [
+            (
+                [0; W],
+                [
+                    0x5b31a8b9799ff836,
+                    0xe385174fe60f4b08,
+                    0xe82c6be88d50767c,
+                    0x2778f3b6a18981e2,
+                    0xdeebf402c2a98074,
+                    0x7c963653f27a1734,
+                    0x0f46bb6190c980e7,
+                    0x49828ccc24482bf3,
+                    0xd73a07cf7eda8691,
+                    0xab9ca371bae24a24,
+                    0x75f7223257cb0b1d,
+                    0x9703d4dc4a9dcbf6,
+                ],
+            ),
+            (
+                [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11],
+                [
+                    0xf292ab67c0f14b03,
+                    0x0a32f1b37656544c,
+                    0x053c61ab895498de,
+                    0x02ff92e55b196ffb,
+                    0x58176e8f6f58cab2,
+                    0xb0aa1206e7aec0f8,
+                    0xe90c13f3dce83ca4,
+                    0xf4da15333edf39c2,
+                    0x23b701c053c2ca6c,
+                    0xd233d593dcdfbf58,
+                    0x4effa5f9516fb52e,
+                    0x0aaf4489f1f40166,
+                ],
+            ),
+            (
+                [P_MINUS_1; W],
+                [
+                    0x86f498c3f6f8c30a,
+                    0xb9c1930740ce3e3f,
+                    0xf38d22f1852fbb43,
+                    0xf56e2de37c6f1261,
+                    0xe8e6c9350180fba7,
+                    0xdc389fa621dbad0c,
+                    0x5ed1d3754c149bb3,
+                    0xb151306f2c45d95d,
+                    0xd0491b449c1d2812,
+                    0x5fe3fcb315c0cee8,
+                    0x13199f45c406f769,
+                    0x9c7d84e25ded814c,
+                ],
+            ),
+            (
+                [
+                    0x4C52_5550,
+                    0x0123_4567_89AB_CDEF,
+                    0xFEDC_BA98_7654_3210,
+                    1,
+                    P_MINUS_1,
+                    2,
+                    0xDEAD_BEEF,
+                    0x8000_0000_0000_0000,
+                    0x0000_0001_0000_0000,
+                    0xFFFF_FFFE_FFFF_FFFF,
+                    7,
+                    0x5555_5555_5555_5555,
+                ],
+                [
+                    0xa5477ce5e959c326,
+                    0xd703c3b8bfc7ef6f,
+                    0xf6c05ec06abc129b,
+                    0xdc0d05d40a0b4cfd,
+                    0x114f366e8f9d209c,
+                    0x37c4e727b115107b,
+                    0xfc69b775bb1e8b15,
+                    0xf1dceac2e25ceca6,
+                    0xac4263d8502eba31,
+                    0xe2b8b4f328f940e0,
+                    0x49f540ce61e84e29,
+                    0x8a68d27615c3d428,
+                ],
+            ),
         ];
 
         fn row(
@@ -3182,12 +3258,26 @@ mod test {
 
         #[test]
         fn known_answer_on_air_trace_and_native_permutation() {
-            let input: [GlF; W] = core::array::from_fn(|i| GlF::from_u64(i as u64));
-            let expected = KAT_OUTPUT.map(GlF::from_u64);
-            assert_eq!(default_goldilocks_poseidon2_12().permute(input), expected);
+            let native = default_goldilocks_poseidon2_12();
+            let mut rows = Vec::new();
+            for (input, output) in KAT {
+                let input = input.map(GlF::from_u64);
+                assert_eq!(
+                    native.permute(input),
+                    output.map(GlF::from_u64),
+                    "{input:?}"
+                );
+                rows.push(row(input, true, false, false));
+            }
 
-            let (air, trace) = air_and_trace(vec![row(input, true, false, false)]);
-            assert_eq!(trace_output(&trace, 0), expected);
+            let (air, trace) = air_and_trace(rows);
+            for (r, (_, output)) in KAT.iter().enumerate() {
+                assert_eq!(
+                    trace_output(&trace, r),
+                    output.map(GlF::from_u64),
+                    "row {r}"
+                );
+            }
             assert_air_satisfies::<GlF, GlEF, _>(&air, &trace);
         }
 

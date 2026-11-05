@@ -2025,8 +2025,11 @@ mod tests {
         }
     }
 
-    /// Negative: an `out` computed with the binomial reduction `x^3 = W` (for any `W`, here
-    /// the honest product's reduction swapped out) must not satisfy the cubic-trinomial AIR.
+    /// Negative: an `out` computed with a binomial reduction `x^3 = W` must not satisfy the
+    /// cubic-trinomial AIR (`x^3 = x + 1`), for `W = 1` and `W = 7` (Goldilocks has no binomial
+    /// cubic; 7 is its quadratic `W`). Each wrong product does satisfy the binomial AIR with
+    /// that `W`, so the rejection comes from the reduction alone, and that binomial AIR in turn
+    /// rejects the honest trinomial product.
     #[test]
     fn cubic_trinomial_rejects_binomial_product() {
         type Ext = CubicTrinomialExtensionField<Goldilocks>;
@@ -2040,28 +2043,69 @@ mod tests {
             Goldilocks::from_u64(13),
             Goldilocks::from_u64(17),
         ];
-        // Schoolbook product reduced with `x^3 = 1`, the binomial a mistaken dispatch would use.
-        let mut wrong = [Goldilocks::ZERO; 3];
-        for i in 0..3 {
-            for j in 0..3 {
-                wrong[(i + j) % 3] += a[i] * b[j];
+        let air_for = |trace: &AluTrace<Ext>, w: Option<Goldilocks>| {
+            let preprocessed = trace_to_preprocessed::<Goldilocks, _, 3>(trace);
+            match w {
+                None => AluAir::<Goldilocks, 3>::new_cubic_trinomial_with_preprocessed(
+                    1,
+                    1,
+                    preprocessed,
+                    1,
+                ),
+                Some(w) => AluAir::<Goldilocks, 3>::new_binomial_with_preprocessed(
+                    1,
+                    1,
+                    w,
+                    preprocessed,
+                    1,
+                ),
             }
-        }
-        let a = Ext::from_basis_coefficients_slice(&a).unwrap();
-        let b = Ext::from_basis_coefficients_slice(&b).unwrap();
-        let wrong = Ext::from_basis_coefficients_slice(&wrong).unwrap();
-        assert_ne!(a * b, wrong);
-
-        let trace = AluTrace {
+        };
+        let mul_trace = |out: Ext| AluTrace {
             op_kind: vec![AluOpKind::Mul],
-            values: vec![[a, b, Ext::ZERO, wrong]],
+            values: vec![[
+                Ext::from_basis_coefficients_slice(&a).unwrap(),
+                Ext::from_basis_coefficients_slice(&b).unwrap(),
+                Ext::ZERO,
+                out,
+            ]],
             indices: vec![[WitnessId(1), WitnessId(2), WitnessId(0), WitnessId(3)]],
         };
-        let preprocessed = trace_to_preprocessed::<Goldilocks, _, 3>(&trace);
-        let air =
-            AluAir::<Goldilocks, 3>::new_cubic_trinomial_with_preprocessed(1, 1, preprocessed, 1);
-        let matrix = air.trace_to_matrix(&trace, 1);
-        assert_air_rejects::<Goldilocks, Ext, _>(&air, &matrix);
+        let honest = Ext::from_basis_coefficients_slice(&a).unwrap()
+            * Ext::from_basis_coefficients_slice(&b).unwrap();
+
+        for w in [Goldilocks::ONE, Goldilocks::from_u64(7)] {
+            // Schoolbook product reduced with `x^3 = w`, the binomial a mistaken dispatch
+            // would use.
+            let mut wrong = [Goldilocks::ZERO; 3];
+            for i in 0..3 {
+                for j in 0..3 {
+                    let term = a[i] * b[j];
+                    wrong[(i + j) % 3] += if i + j >= 3 { w * term } else { term };
+                }
+            }
+            let wrong = Ext::from_basis_coefficients_slice(&wrong).unwrap();
+            assert_ne!(honest, wrong, "w = {w}");
+
+            let trace = mul_trace(wrong);
+            let trinomial = air_for(&trace, None);
+            assert_air_rejects::<Goldilocks, Ext, _>(
+                &trinomial,
+                &trinomial.trace_to_matrix(&trace, 1),
+            );
+            let binomial = air_for(&trace, Some(w));
+            assert_air_satisfies::<Goldilocks, Ext, _>(
+                &binomial,
+                &binomial.trace_to_matrix(&trace, 1),
+            );
+
+            let trace = mul_trace(honest);
+            let binomial = air_for(&trace, Some(w));
+            assert_air_rejects::<Goldilocks, Ext, _>(
+                &binomial,
+                &binomial.trace_to_matrix(&trace, 1),
+            );
+        }
     }
 
     #[test]
