@@ -34,6 +34,7 @@ use crate::input_contract::stark_layout::{
     CommitmentRole, InstanceLayout, MatrixRoute, NativeStarkLayout, checked_power_of_two,
     validate_preprocessed_metadata,
 };
+use crate::prepared::input::ReferenceCheck;
 use crate::traits::{
     LookupMetadata, Recursive, RecursiveAir, RecursiveChallenger, RecursiveLookupGadget,
     RecursivePcs,
@@ -59,6 +60,66 @@ pub type PcsVerifierParams<SC, InputProof, OpeningProof, Comm> =
 
 /// Type-erased recursive AIR entry for non-primitive tables.
 pub type DynRecursionAirEntry<SC> = DynamicAirEntry<SC>;
+
+/// One instance's opening layout from trusted metadata alone: the AIR, its extended log degree,
+/// its preprocessed width and its lookups. Shared by [`plan_batch_native_layout`] (which then
+/// compares a proof's openings against it) and the shape-reference synthesizer
+/// ([`crate::shape_reference`]), so the two cannot disagree.
+pub(crate) fn derive_instance_layout<SC, A, LG>(
+    config: &SC,
+    air: &A,
+    ext_log: usize,
+    pre_width: usize,
+    lookup_set: &[Lookup<Val<SC>>],
+    lookup_gadget: &LG,
+) -> Result<InstanceLayout, VerificationError>
+where
+    SC: StarkGenericConfig,
+    A: RecursiveAir<Val<SC>, SC::Challenge, LG>,
+    LG: RecursiveLookupGadget<SC::Challenge>,
+    Val<SC>: PrimeField64,
+    SC::Challenge: ExtensionField<Val<SC>> + PrimeCharacteristicRing,
+{
+    let base_log = ext_log.checked_sub(config.is_zk()).ok_or_else(|| {
+        VerificationError::InvalidProofShape("extended degree smaller than zk adjustment".into())
+    })?;
+    let permutation_width = if lookup_set.is_empty() {
+        0
+    } else {
+        lookup_set
+            .len()
+            .checked_add(1)
+            .and_then(|width| width.checked_mul(SC::Challenge::DIMENSION))
+            .ok_or_else(|| {
+                VerificationError::InvalidProofShape("packed permutation width overflows".into())
+            })?
+    };
+    let log_quotient = air.get_log_num_quotient_chunks(
+        pre_width,
+        checked_power_of_two(base_log)
+            .map_err(|error| VerificationError::InvalidProofShape(error.to_string()))?,
+        lookup_set,
+        config.is_zk(),
+        lookup_gadget,
+    );
+    let quotient_chunks =
+        checked_power_of_two(log_quotient.checked_add(config.is_zk()).ok_or_else(|| {
+            VerificationError::InvalidProofShape("quotient log overflows".into())
+        })?)
+        .map_err(|error| VerificationError::InvalidProofShape(error.to_string()))?;
+    Ok(InstanceLayout {
+        ext_log,
+        base_log,
+        challenge_width: SC::Challenge::DIMENSION,
+        trace_width: air.width(),
+        trace_next: air.opens_trace_next(),
+        pre_width,
+        pre_next: air.opens_preprocessed_next(),
+        quotient_log: log_quotient,
+        quotient_chunks,
+        permutation_width,
+    })
+}
 
 /// Derive and validate a batch STARK's native PCS opening layout before
 /// target allocation or transcript work. `lookups` must come from the trusted
@@ -126,44 +187,25 @@ where
     let mut planned = Vec::with_capacity(count);
     for (index, ((air, opened), lookup_set)) in airs.iter().zip(instances).zip(lookups).enumerate()
     {
-        let ext_log = proof.degree_bits[index];
-        let base_log = ext_log.checked_sub(config.is_zk()).ok_or_else(|| {
-            VerificationError::InvalidProofShape(
-                "extended degree smaller than zk adjustment".into(),
-            )
-        })?;
         let pre_width = common
             .preprocessed
             .as_ref()
             .and_then(|global| global.instances[index].as_ref().map(|meta| meta.width))
             .unwrap_or(0);
-        let base = &opened.base_opened_values;
-        let permutation_width = if lookup_set.is_empty() {
-            0
-        } else {
-            lookup_set
-                .len()
-                .checked_add(1)
-                .and_then(|width| width.checked_mul(SC::Challenge::DIMENSION))
-                .ok_or_else(|| {
-                    VerificationError::InvalidProofShape(
-                        "packed permutation width overflows".into(),
-                    )
-                })?
-        };
-        let log_quotient = air.get_log_num_quotient_chunks(
+        let instance = derive_instance_layout(
+            config,
+            air,
+            proof.degree_bits[index],
             pre_width,
-            checked_power_of_two(base_log)
-                .map_err(|error| VerificationError::InvalidProofShape(error.to_string()))?,
             lookup_set,
-            config.is_zk(),
             lookup_gadget,
-        );
-        let quotient_chunks =
-            checked_power_of_two(log_quotient.checked_add(config.is_zk()).ok_or_else(|| {
-                VerificationError::InvalidProofShape("quotient log overflows".into())
-            })?)
-            .map_err(|error| VerificationError::InvalidProofShape(error.to_string()))?;
+        )?;
+        let InstanceLayout {
+            quotient_chunks,
+            permutation_width,
+            ..
+        } = instance;
+        let base = &opened.base_opened_values;
         if base.trace_local.len() != air.width()
             || base.trace_next.as_ref().map_or(0, Vec::len)
                 != air.width() * usize::from(air.opens_trace_next())
@@ -187,18 +229,7 @@ where
                 "batch-STARK openings disagree with reconstructed AIR metadata".into(),
             ));
         }
-        planned.push(InstanceLayout {
-            ext_log,
-            base_log,
-            challenge_width: SC::Challenge::DIMENSION,
-            trace_width: air.width(),
-            trace_next: air.opens_trace_next(),
-            pre_width,
-            pre_next: air.opens_preprocessed_next(),
-            quotient_log: log_quotient,
-            quotient_chunks,
-            permutation_width,
-        });
+        planned.push(instance);
     }
     let has_permutation = planned
         .iter()
@@ -764,9 +795,82 @@ where
     SymbolicExpressionExt<Val<SC>, SC::Challenge>:
         Algebra<SymbolicExpression<Val<SC>>> + Algebra<SC::Challenge>,
 {
-    verifier
-        .verify(proof, statement)
-        .map_err(|error| VerificationError::InvalidProofShape(error.to_string()))?;
+    build_trusted_p3_batch_proof_circuit::<
+        SC,
+        Comm,
+        InputProof,
+        OpeningProof,
+        LG,
+        CP,
+        WIDTH,
+        RATE,
+        TRACE_D,
+    >(
+        verifier,
+        circuit,
+        proof,
+        statement,
+        pcs_params,
+        lookup_gadget,
+        challenger_perm_config,
+        ReferenceCheck::NativeVerify,
+    )
+}
+
+/// [`verify_trusted_p3_batch_proof_circuit`], with the reference's native verification governed
+/// by `check` (a shape reference skips it; see [`ReferenceCheck`]).
+#[allow(clippy::type_complexity)]
+#[allow(clippy::too_many_arguments)]
+pub(crate) fn build_trusted_p3_batch_proof_circuit<
+    SC: StarkGenericConfig + 'static,
+    Comm: Recursive<
+            SC::Challenge,
+            Input = <SC::Pcs as Pcs<SC::Challenge, SC::Challenger>>::Commitment,
+        > + Clone
+        + ObservableCommitment,
+    InputProof: Recursive<SC::Challenge>,
+    OpeningProof: Recursive<SC::Challenge, Input = <SC::Pcs as Pcs<SC::Challenge, SC::Challenger>>::Proof>,
+    LG: RecursiveLookupGadget<SC::Challenge>,
+    CP: ChallengerPermConfig,
+    const WIDTH: usize,
+    const RATE: usize,
+    const TRACE_D: usize,
+>(
+    verifier: &CircuitVerifier<SC>,
+    circuit: &mut CircuitBuilder<SC::Challenge>,
+    proof: &p3_circuit_prover::batch_stark_prover::BatchStarkProof<SC>,
+    statement: &[Val<SC>],
+    pcs_params: &PcsVerifierParams<SC, InputProof, OpeningProof, Comm>,
+    lookup_gadget: &LG,
+    challenger_perm_config: CP,
+    check: ReferenceCheck,
+) -> Result<
+    (
+        BatchStarkVerifierInputsBuilder<SC, Comm, OpeningProof>,
+        Vec<NonPrimitiveOpId>,
+    ),
+    VerificationError,
+>
+where
+    SC::Challenger: p3_challenger::GrindingChallenger<Witness = p3_uni_stark::Val<SC>>,
+    <SC as StarkGenericConfig>::Pcs: RecursivePcs<
+            SC,
+            InputProof,
+            OpeningProof,
+            Comm,
+            <SC::Pcs as Pcs<SC::Challenge, SC::Challenger>>::Domain,
+        >,
+    Val<SC>: PrimeField64 + p3_circuit_prover::config::StarkField,
+    SC::Challenge: ExtensionField<Val<SC>> + PrimeCharacteristicRing + ExtractBinomialW<Val<SC>>,
+    <<SC as StarkGenericConfig>::Pcs as Pcs<SC::Challenge, SC::Challenger>>::Domain: Clone,
+    SymbolicExpressionExt<Val<SC>, SC::Challenge>:
+        Algebra<SymbolicExpression<Val<SC>>> + Algebra<SC::Challenge>,
+{
+    if check.verifies() {
+        verifier
+            .verify(proof, statement)
+            .map_err(|error| VerificationError::InvalidProofShape(error.to_string()))?;
+    }
     let tables = trusted_batch_tables::<SC, TRACE_D>(verifier, statement)?;
     verify_p3_batch_proof_circuit_with_tables::<
         SC,

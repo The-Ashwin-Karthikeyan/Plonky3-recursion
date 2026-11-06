@@ -344,6 +344,34 @@ where
         result: &Self::VerifierResult,
         expected: Option<&NativeCommitment<SC>>,
     ) -> Result<(), VerificationError>;
+
+    /// [`Self::capture_trusted_batch_input_contract`] from the verifier alone: the contract of
+    /// its shape reference ([`crate::shape_reference::trusted_batch_shape_reference`]), with
+    /// every structural check of the reference path and no native verification of the
+    /// (synthesized, never valid) reference. Later witnesses are still validated against it with
+    /// [`Self::validate_trusted_batch_input`], which verifies them natively.
+    fn capture_trusted_batch_shape_contract(
+        &self,
+        _verifier: &CircuitVerifier<SC>,
+    ) -> Result<Self::InputContract, VerificationError> {
+        Err(VerificationError::InvalidProofShape(
+            "this backend has no shape-only trusted allocation".into(),
+        ))
+    }
+
+    /// [`Self::build_trusted_batch_verifier_circuit`] from the verifier alone: the same circuit
+    /// the reference path builds from any proof of this verifier's shape, built from its shape
+    /// reference without native verification of that reference. Only the verifier's descriptor
+    /// (its relation, common data, preprocessed commitment and config) determines the circuit.
+    fn build_trusted_batch_verifier_circuit_from_shape(
+        &self,
+        _verifier: &CircuitVerifier<SC>,
+        _circuit: &mut CircuitBuilder<SC::Challenge>,
+    ) -> Result<Self::VerifierResult, VerificationError> {
+        Err(VerificationError::InvalidProofShape(
+            "this backend has no shape-only trusted allocation".into(),
+        ))
+    }
 }
 
 #[cfg(test)]

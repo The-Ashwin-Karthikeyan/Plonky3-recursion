@@ -493,6 +493,27 @@ pub(crate) fn compare_input_contract<F: PartialEq, C: PartialEq, O: PartialEq>(
     Ok(())
 }
 
+/// Whether a trusted batch entry point natively verifies the proof it allocates from.
+///
+/// The trusted entry points read only the *shape* of that proof: the circuit is built from the
+/// retained verifier's descriptor, and the proof's values never enter it. A real reference
+/// proof is still verified natively, as before. A shape reference
+/// ([`crate::shape_reference`]) is synthesized from the verifier itself and is never valid, so
+/// it skips exactly that one check; every structural check still runs.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum ReferenceCheck {
+    /// The reference is a real proof of the child: verify it natively first.
+    NativeVerify,
+    /// The reference is the verifier's own shape reference: structural checks only.
+    ShapeOnly,
+}
+
+impl ReferenceCheck {
+    pub(crate) const fn verifies(self) -> bool {
+        matches!(self, Self::NativeVerify)
+    }
+}
+
 /// Capture a trusted batch input contract from retained verifier authority. Only the verifier's
 /// audited Statement instance is dynamic-by-length; every ordinary NPO value remains exact.
 pub(crate) fn capture_trusted_batch_input_contract<SC, Comm, Opening>(
@@ -511,9 +532,38 @@ where
     p3_air::SymbolicExpressionExt<Val<SC>, SC::Challenge>:
         p3_field::Algebra<p3_air::SymbolicExpression<Val<SC>>> + p3_field::Algebra<SC::Challenge>,
 {
-    verifier
-        .verify(proof, expected_statement)
-        .map_err(|error| VerificationError::InvalidProofShape(error.to_string()))?;
+    capture_trusted_batch_input_contract_checked::<SC, Comm, Opening>(
+        verifier,
+        proof,
+        expected_statement,
+        ReferenceCheck::NativeVerify,
+    )
+}
+
+/// [`capture_trusted_batch_input_contract`], with the reference's native verification governed
+/// by `check`.
+pub(crate) fn capture_trusted_batch_input_contract_checked<SC, Comm, Opening>(
+    verifier: &CircuitVerifier<SC>,
+    proof: &BatchStarkProof<SC>,
+    expected_statement: &[Val<SC>],
+    check: ReferenceCheck,
+) -> CaptureShapeResult<SC, Comm::Shape, Opening::Shape>
+where
+    SC::Challenger: p3_challenger::GrindingChallenger<Witness = p3_uni_stark::Val<SC>>,
+    SC: StarkGenericConfig + 'static,
+    Comm: Recursive<SC::Challenge, Input = NativeCommitment<SC>> + PreparedRecursive<SC::Challenge>,
+    Opening: Recursive<SC::Challenge, Input = <SC::Pcs as Pcs<SC::Challenge, SC::Challenger>>::Proof>
+        + PreparedRecursive<SC::Challenge>,
+    Val<SC>: PrimeField64 + p3_circuit_prover::config::StarkField,
+    SC::Challenge: ExtensionField<Val<SC>> + ExtractBinomialW<Val<SC>>,
+    p3_air::SymbolicExpressionExt<Val<SC>, SC::Challenge>:
+        p3_field::Algebra<p3_air::SymbolicExpression<Val<SC>>> + p3_field::Algebra<SC::Challenge>,
+{
+    if check.verifies() {
+        verifier
+            .verify(proof, expected_statement)
+            .map_err(|error| VerificationError::InvalidProofShape(error.to_string()))?;
+    }
     let table_public_inputs = verifier
         .table_public_values(expected_statement)
         .map_err(|error| VerificationError::InvalidProofShape(error.to_string()))?;

@@ -61,11 +61,13 @@ mod periodic;
 mod quotient;
 mod stark;
 
-pub(crate) use batch_stark::plan_batch_native_layout;
 pub use batch_stark::{
     CircuitTablesAir, PcsVerifierParams, ReconstructedBatchTables, reconstruct_batch_tables,
     trusted_batch_tables, verify_batch_circuit, verify_p3_batch_proof_circuit,
     verify_trusted_p3_batch_proof_circuit,
+};
+pub(crate) use batch_stark::{
+    build_trusted_p3_batch_proof_circuit, derive_instance_layout, plan_batch_native_layout,
 };
 pub use binary_air::{BinaryAirConstraintPlan, BinaryPolyAirConstraintPlan};
 pub use binary_boolean_multi_stark::{

@@ -21,6 +21,7 @@ pub mod prepared;
 pub mod profile;
 pub mod public_inputs;
 pub mod recursion;
+pub mod shape_reference;
 pub mod traits;
 pub mod transcript;
 pub mod types;

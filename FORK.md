@@ -637,3 +637,66 @@ one core: an outer wrap proved in about 147 s, against about 13 s without it.
 
 **Upstreamable.** Yes. The pool was added while upstream depended on Plonky3 0.8.0; upstream now
 pins 0.9.0-rc.2 (as at this fork's base), and the pool's TODO asked for this re-validation.
+
+### WP15: shape-only trusted child allocation
+
+**What changed.**
+
+- `recursion/src/shape_reference.rs` (new):
+  - `trusted_batch_shape_reference(verifier)`: from a `CircuitVerifier` alone (its relation, common
+    data, Statement layout and config), a recursion-layer proof with exactly the shape every real
+    proof of that verifier has and every value zero, plus a zero statement of the right length.
+  - It builds on `batch_proof_shape_reference(config, airs, degree_bits, common, lookups, gadget)`,
+    the same for a batch-STARK proof of trusted AIRs. Its opened-value widths and quotient chunk
+    counts come from `derive_instance_layout`, factored out of `plan_batch_native_layout` (which
+    now calls it), so the synthesizer and the validator share one rule. Its FRI dimensions are the
+    ones the context validator checks: commitment order, matrix widths and heights, query count,
+    `p3_fri::fold_schedule`, final polynomial length.
+  - `FriShapeRequest`, `FriShapeParts`, `merkle_fri_shape_parts`: the PCS parts for Merkle-tree FRI
+    configs. Merkle multiproofs are left empty: their length depends on the query indices and they
+    are not part of any allocation shape.
+  - `zeroed_batch_proof`, `zeroed_batch_stark_proof`: a real proof with every value zeroed, for
+    comparing shapes in tests.
+  - Non-hiding configs only.
+- `FriRecursionConfig::shape_reference_pcs(request)`: new method with a default that returns an
+  error, so a config opts in. The KoalaBear D4 test config implements it.
+- `TrustedPcsRecursionBackend`:
+  - Two new methods, `capture_trusted_batch_shape_contract(verifier)` and
+    `build_trusted_batch_verifier_circuit_from_shape(verifier, circuit)`. They have default
+    implementations that return an error, and the FRI backends implement them.
+  - Each runs the same code as `capture_trusted_batch_input_contract` /
+    `build_trusted_batch_verifier_circuit` on the verifier's shape reference: resource preflight,
+    structural FRI and cap validation, layout planning and the batch-proof structure checks. It
+    skips only the native verification of that reference.
+  - The FRI build body moved into one private function, `build_trusted_fri_batch_circuit`, shared
+    by both paths. A crate-private `ReferenceCheck { NativeVerify, ShapeOnly }` selects the one
+    step that differs in `capture_trusted_batch_input_contract_checked`,
+    `preflight_trusted_fri_batch` and `build_trusted_p3_batch_proof_circuit`.
+  - The public `verify_trusted_p3_batch_proof_circuit` and every existing trusted method behave as
+    before, with `NativeVerify`.
+- Tests: `shape_reference::tests`. For two child circuits of different shapes:
+  - the shape reference equals a real proof zeroed, byte for byte (postcard);
+  - the shape path builds the reference path's parent circuit (ops including constants, rows,
+    tags, Statement schema) and contract;
+  - the real child validates against the shape contract and executes in the shape-built parent;
+  - another circuit's shape contract is refused;
+  - a config without native FRI parameters is refused on the shape path.
+
+**Relaxed invariant.** Before WP15, every trusted entry point natively verified the proof that a
+child's in-circuit verifier was allocated from. The shape-only path builds from a synthesized proof
+that is never valid, and does not verify it. This is sound because:
+
+- the reference's values never enter the circuit, which is the `PreparedRecursive` contract. Only
+  its shape does, and that shape is a function of the retained verifier. The tests check that the
+  two paths give the same circuit;
+- the child's preprocessed commitment is still pinned as circuit constants from the verifier
+  (`constrain_trusted_preprocessing`), never from a proof;
+- every real child is still verified: natively by `validate_trusted_batch_input` (native
+  verification, then contract equality) before it is packed, and in circuit by the verifier the
+  circuit contains.
+
+**Why.** A parent's verifying key can now be derived from its children's verifying keys alone,
+without any proof of them. lrup-recursion needs this to derive its aggregation tree's keys, and the
+outer wrap's, from public data (its plan 7.1 and 7.5).
+
+**Upstreamable.** Yes: additive, opt-in per config and per backend.

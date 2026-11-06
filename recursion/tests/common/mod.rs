@@ -400,6 +400,26 @@ where
             Poseidon2Config::KOALA_BEAR_D4_W16,
         )
     }
+
+    fn shape_reference_pcs(
+        &self,
+        request: &p3_recursion::shape_reference::FriShapeRequest,
+    ) -> Result<
+        p3_recursion::shape_reference::FriShapeParts<
+            <MyPcs as Pcs<Challenge, Challenger>>::Commitment,
+            <MyPcs as Pcs<Challenge, Challenger>>::Proof,
+        >,
+        VerificationError,
+    > {
+        // `MyMmcs` commits with cap height 0.
+        Ok(p3_recursion::shape_reference::merkle_fri_shape_parts::<
+            F,
+            Challenge,
+            MyMmcs,
+            ChallengeMmcs,
+            DIGEST_ELEMS,
+        >(request, 0))
+    }
 }
 
 /// Backend type for a KoalaBear D4 recursion layer (spelled out so callers can turbofish it when
