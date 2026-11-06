@@ -17,13 +17,9 @@ Part of [Plonky3-recursion](https://github.com/Plonky3/Plonky3-recursion), dual-
 The [executable BabyBear example](src/lib.rs) shows statement export, preparation,
 proving, and trusted verification together.
 
-With `parallel` enabled, hiding batch proofs run in a private one-worker Rayon
-pool, so they lose native batch parallelism; non-hiding proofs retain the usual
-parallel path. The pinned Plonky3 revision draws hiding randomness outside its
-parallel work (Plonky3#2368), so the pool is a conservative guard until hiding
-batch proving is re-validated under Rayon. If another dependency enables
-`p3-maybe-rayon/parallel` while this crate's `parallel` feature is off, hiding
-proving returns an early error asking for `p3-circuit-prover/parallel`.
+With `parallel` enabled, hiding and non-hiding batch proofs both run on the
+caller's Rayon pool. The pinned Plonky3 release draws hiding randomness under its
+generator locks and releases them before any parallel work (Plonky3#2368).
 Custom configurations used with `parallel` must be `Sync`, and their batch
 proofs must be `Send`; feature-off builds retain the original serial generic
 requirements and `no_std` support.

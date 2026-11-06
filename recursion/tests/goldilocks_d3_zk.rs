@@ -14,6 +14,8 @@
 //! - the hiding layer-2 proof verifies natively, with the hiding structure present;
 //! - two proofs of the same statement and witness share no commitment, Merkle digest, salt or
 //!   opened value (walked field by field);
+//! - hiding proofs of one preparation proven concurrently on one Rayon pool complete and share
+//!   none of these either;
 //! - a table below the hiding budget is refused (by the config's packing check, and by the PCS
 //!   when proving with an unpadded packing), and so are too few random codewords;
 //! - a changed salt (input batch or FRI commit phase) is rejected by the native verifier;
@@ -512,6 +514,93 @@ fn two_proofs_share_no_commitment_salt_or_opened_value() {
             &format!("proof {index}: input vs FRI salts"),
             &walk.input_salts,
             &walk.fri_salts,
+        );
+    }
+}
+
+/// Hiding proofs of one shared preparation, proven concurrently as tasks of one Rayon pool,
+/// complete, verify, and share no commitment root, Merkle digest, salt or opened value.
+///
+/// All of them draw from the same PCS and MMCS generators. With `parallel`, a worker that waits
+/// inside one proof's parallel work can pick up another proof that locks the same generator
+/// (Plonky3#2368): this hangs if any generator lock is held across parallel work, and the
+/// watchdog turns that hang into a failure. Concurrent draws must not repeat randomness.
+#[test]
+fn concurrent_proofs_from_one_preparation_complete_and_share_nothing() {
+    use rayon::prelude::*;
+
+    const PROOFS: usize = 4;
+    const DEADLINE: Duration = Duration::from_secs(600);
+
+    let params = GoldilocksD3W12ZkParams::test();
+    let layer = layer2(D3FriParams::test_params(), D3FriParams::test_params());
+    let first = prove_hiding(params, &layer.circuit, &layer.traces);
+
+    let (done, finished) = std::sync::mpsc::channel::<()>();
+    let watchdog = std::thread::spawn(move || {
+        if finished.recv_timeout(DEADLINE).is_err() {
+            eprintln!("concurrent hiding proofs did not finish within {DEADLINE:?}: aborting");
+            std::process::abort();
+        }
+    });
+    let pool = rayon::ThreadPoolBuilder::new()
+        .num_threads(PROOFS)
+        .build()
+        .expect("the test pool builds");
+    let start = Instant::now();
+    let proofs: Vec<ZkProof> = pool.install(|| {
+        (0..PROOFS)
+            .into_par_iter()
+            .map(|_| {
+                first
+                    .prepared
+                    .prove(&layer.traces)
+                    .expect("a concurrent proof from the shared preparation")
+            })
+            .collect()
+    });
+    let elapsed = start.elapsed();
+    done.send(()).expect("the watchdog is waiting");
+    watchdog.join().expect("the watchdog exits");
+    eprintln!(
+        "{PROOFS} concurrent hiding proofs in {elapsed:.2?} (one sequential proof: {:.2?})",
+        first.prove
+    );
+
+    for proof in &proofs {
+        first
+            .verifier
+            .verify(proof, &[])
+            .expect("a concurrent proof verifies");
+    }
+    let walks: Vec<Disclosed> = core::iter::once(&first.proof)
+        .chain(&proofs)
+        .map(disclosed)
+        .collect();
+    for i in 0..walks.len() {
+        for j in i + 1..walks.len() {
+            let (a, b) = (&walks[i], &walks[j]);
+            assert_disjoint(
+                &format!("proofs {i} and {j}: digests"),
+                &a.digests,
+                &b.digests,
+            );
+            assert_disjoint(&format!("proofs {i} and {j}: salts"), &a.salts, &b.salts);
+            assert_disjoint(
+                &format!("proofs {i} and {j}: extension values"),
+                &a.ext_values,
+                &b.ext_values,
+            );
+            assert_disjoint(
+                &format!("proofs {i} and {j}: input query openings"),
+                &a.base_values,
+                &b.base_values,
+            );
+        }
+        assert_disjoint(
+            &format!("proof {i}: input vs FRI salts"),
+            &walks[i].input_salts,
+            &walks[i].fri_salts,
         );
     }
 }

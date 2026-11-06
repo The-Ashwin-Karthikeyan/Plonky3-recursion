@@ -124,50 +124,6 @@ pub trait ProvingMaybeSync {}
 #[cfg(not(feature = "parallel"))]
 impl<T: ?Sized> ProvingMaybeSync for T {}
 
-fn ensure_safe_hiding_parallelism(is_zk: bool) -> Result<(), BatchStarkProverError> {
-    if is_zk && p3_maybe_rayon::PARALLEL_ENABLED && !cfg!(feature = "parallel") {
-        return Err(BatchStarkProverError::Prove(
-            "hiding proofs with the Rayon backend require p3-circuit-prover/parallel; enable that feature to isolate native batch proving in a one-worker pool".into(),
-        ));
-    }
-    Ok(())
-}
-
-#[cfg(feature = "parallel")]
-fn run_native_proof_in_pool<R: Send>(
-    is_zk: bool,
-    prove: impl FnOnce() -> R + Send,
-) -> Result<R, BatchStarkProverError> {
-    if is_zk {
-        // Hiding batch proofs run on one Rayon worker and give up native batch parallelism.
-        // TODO: drop this pool once hiding batch proving is re-validated under Rayon;
-        // the pinned Plonky3 revision draws hiding randomness outside its parallel
-        // work (Plonky3#2368).
-        let pool = rayon::ThreadPoolBuilder::new()
-            .num_threads(1)
-            .build()
-            .map_err(|error| {
-                BatchStarkProverError::Prove(format!(
-                    "failed to create the one-worker pool for hiding batch proving: {error}"
-                ))
-            })?;
-        let dispatch = tracing::dispatcher::get_default(Clone::clone);
-        let span = tracing::Span::current();
-        Ok(pool
-            .install(move || tracing::dispatcher::with_default(&dispatch, || span.in_scope(prove))))
-    } else {
-        Ok(prove())
-    }
-}
-
-#[cfg(not(feature = "parallel"))]
-fn run_native_proof_in_pool<R>(
-    _is_zk: bool,
-    prove: impl FnOnce() -> R,
-) -> Result<R, BatchStarkProverError> {
-    Ok(prove())
-}
-
 /// Returns the witness-bus dimension for a D=1 Poseidon config given the circuit's extension
 /// degree, or `None` if the scale is not supported.
 ///
@@ -2105,7 +2061,6 @@ where
         <SC::Pcs as Pcs<SC::Challenge, SC::Challenger>>::ProverData: Sync,
         <SC::Pcs as Pcs<SC::Challenge, SC::Challenger>>::Commitment: Sync,
     {
-        ensure_safe_hiding_parallelism(self.config.is_zk() != 0)?;
         // Reject a misconfigured packing (e.g. a per-table override below the global
         // min-height floor) before any table height derived from it is used to build or
         // pad a trace, rather than only catching it later via `BatchStarkProof::validate`.
@@ -2573,10 +2528,8 @@ where
                 check_lookups(&debug_instances);
             }
 
-            let native_proof = run_native_proof_in_pool(self.config.is_zk() != 0, || {
-                p3_batch_stark::prove_batch(&self.config, &instances, effective_prover_data)
-            })?;
-            native_proof.map_err(|e| BatchStarkProverError::Prove(format!("{e:?}")))?
+            p3_batch_stark::prove_batch(&self.config, &instances, effective_prover_data)
+                .map_err(|e| BatchStarkProverError::Prove(format!("{e:?}")))?
         };
 
         let dynamic_public_values = public_storage.drain(NUM_PRIMITIVE_TABLES..);
@@ -3092,7 +3045,6 @@ where
     where
         EF: Field + ExtensionField<Val<SC>> + ExtractBinomialW<Val<SC>>,
     {
-        ensure_safe_hiding_parallelism(self.config.is_zk() != 0)?;
         if D != EF::DIMENSION {
             return Err(BatchStarkProverError::RelationMismatch(format!(
                 "const extension degree {D} does not match circuit field degree {}",

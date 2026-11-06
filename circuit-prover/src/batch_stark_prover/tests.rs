@@ -448,10 +448,6 @@ fn default_table_prover_source_declaration_preserves_custom_identity() {
 
 #[test]
 fn hiding_trusted_preparation_reuses_one_salted_setup_with_fresh_proof_randomness() {
-    if p3_maybe_rayon::PARALLEL_ENABLED && !cfg!(feature = "parallel") {
-        return;
-    }
-
     const SALT_ELEMS: usize = 4;
     type HidingValMmcs = MerkleTreeHidingMmcs<
         <KoalaBear as p3_field::Field>::Packing,
@@ -527,7 +523,7 @@ fn hiding_trusted_preparation_reuses_one_salted_setup_with_fresh_proof_randomnes
 
 #[cfg(feature = "parallel")]
 #[test]
-fn hiding_proof_quotients_use_single_worker_pool_inside_parallel_caller() {
+fn hiding_proof_quotients_keep_parallel_caller_pool() {
     const SALT_ELEMS: usize = 4;
     type HidingValMmcs = MerkleTreeHidingMmcs<
         <KoalaBear as p3_field::Field>::Packing,
@@ -571,7 +567,7 @@ fn hiding_proof_quotients_use_single_worker_pool_inside_parallel_caller() {
                 StdRng::seed_from_u64(7),
             );
             let (pcs, preprocessing_commits) = CountingPcs::new(pcs);
-            let (pcs, quotient_calls) = pcs.expect_quotient_workers(1, Some("hiding_caller"));
+            let (pcs, quotient_calls) = pcs.expect_quotient_workers(2, None);
             let config = HidingConfig::new(pcs, Challenger::new(permutation));
 
             let mut builder = CircuitBuilder::<KoalaBear>::new();
@@ -636,60 +632,6 @@ fn non_hiding_proof_quotients_keep_parallel_caller_pool() {
         assert_eq!(rayon::current_num_threads(), 2);
         verifier.verify(&proof, &[]).unwrap();
     });
-}
-
-#[cfg(not(feature = "parallel"))]
-#[test]
-fn unified_parallel_backend_rejects_hiding_before_preprocessing_commit() {
-    if !p3_maybe_rayon::PARALLEL_ENABLED {
-        return;
-    }
-
-    const SALT_ELEMS: usize = 4;
-    type HidingValMmcs = MerkleTreeHidingMmcs<
-        <KoalaBear as p3_field::Field>::Packing,
-        <KoalaBear as p3_field::Field>::Packing,
-        MyHash,
-        MyCompress,
-        StdRng,
-        2,
-        DIGEST_ELEMS,
-        SALT_ELEMS,
-    >;
-    type HidingChallengeMmcs = ExtensionMmcs<KoalaBear, Challenge, HidingValMmcs>;
-    type HidingPcs = HidingFriPcs<KoalaBear, Dft, HidingValMmcs, HidingChallengeMmcs, StdRng>;
-    type HidingConfig = StarkConfig<CountingPcs<HidingPcs>, Challenge, Challenger>;
-
-    let permutation = default_koalabear_poseidon2_16();
-    let value_mmcs = HidingValMmcs::new(
-        MyHash::new(permutation.clone()),
-        MyCompress::new(permutation.clone()),
-        0,
-        StdRng::seed_from_u64(11),
-    );
-    let fri_params = FriParameters::new_testing(HidingChallengeMmcs::new(value_mmcs.clone()), 0);
-    let pcs = HidingPcs::new(
-        Dft::default(),
-        value_mmcs,
-        fri_params,
-        4,
-        StdRng::seed_from_u64(7),
-    );
-    let (pcs, preprocessing_commits) = CountingPcs::new(pcs);
-    let config = HidingConfig::new(pcs, Challenger::new(permutation));
-
-    let mut builder = CircuitBuilder::<KoalaBear>::new();
-    let _ = builder.define_const(KoalaBear::TWO);
-    let circuit = builder.build().unwrap();
-    let prepared = BatchStarkProver::new(config)
-        .with_table_packing(TablePacking::new(4, 4).with_min_trace_height(32))
-        .prepare_circuit::<KoalaBear, 1>(&circuit, &[], &[], ConstraintProfile::Standard);
-    assert!(matches!(
-        prepared,
-        Err(BatchStarkProverError::Prove(message))
-            if message.contains("p3-circuit-prover/parallel")
-    ));
-    assert_eq!(preprocessing_commits.load(Ordering::SeqCst), 0);
 }
 
 #[test]

@@ -585,3 +585,55 @@ uses (`lrup-backend-p3` `zk_config.rs`, `make_zk_commit_config`). The key depend
 the parameters and `rand`'s `StdRng` algorithm in the pinned `rand` release.
 
 **Upstreamable.** Yes: generic and additive (the wrapper and method work for any configuration).
+
+### WP14: hiding batch proofs on the caller's Rayon pool
+
+**What changed.**
+
+- `circuit-prover/src/batch_stark_prover.rs`: hiding batch proofs no longer run in a private
+  one-worker Rayon pool. `run_native_proof_in_pool` is removed and `prove_batch` is called
+  directly, as for non-hiding proofs. `ensure_safe_hiding_parallelism`, which refused hiding
+  proving when another crate enabled `p3-maybe-rayon/parallel` without this crate's `parallel`
+  feature (the pool needed that feature), is removed with it. The `ProvingMaybeSend` /
+  `ProvingMaybeSync` bounds, the optional `rayon` dependency and the `parallel` feature are
+  unchanged, so the public API and the lockfile stay as they were.
+- `circuit-prover/src/batch_stark_prover/tests.rs`: the pool's tests follow.
+  `hiding_proof_quotients_use_single_worker_pool_inside_parallel_caller` becomes
+  `hiding_proof_quotients_keep_parallel_caller_pool` (quotient generation of a hiding proof sees the
+  caller's two workers). `unified_parallel_backend_rejects_hiding_before_preprocessing_commit` is
+  removed, and `hiding_trusted_preparation_reuses_one_salted_setup_with_fresh_proof_randomness` no
+  longer skips that configuration.
+- `circuit-prover/README.md`: the paragraph on the pool is updated.
+- `recursion/tests/goldilocks_d3_zk.rs`:
+  `concurrent_proofs_from_one_preparation_complete_and_share_nothing`. Four hiding proofs of one
+  shared preparation (one set of generators) run as tasks of one four-worker Rayon pool, under a
+  watchdog that aborts after 600 s; each verifies, and no two of the five proofs (with a sequential
+  one) share a commitment root, Merkle digest, salt or opened value.
+
+**Why.** The pool (upstream `aeb1c69`) guarded against a liveness problem, Plonky3#2368: a Rayon
+worker that waits inside parallel work may run another queued task on the same PCS or MMCS, and
+spin forever on a generator lock its own thread holds. In the pinned 0.9.0-rc.2 release no
+generator lock is held across parallel work:
+
+- `p3-fri` `hiding_pcs.rs`: `commit` (line 247) and `get_quotient_ldes` (line 510, which
+  `p3-batch-stark` calls inside its parallel loop over instances, `prover.rs:401`) fork a private
+  `StdRng` under the lock and release it before the parallel work;
+  `get_opt_randomization_poly_commitment` (line 732) holds the lock only while one matrix is drawn,
+  sequentially; `Clone` (line 130) forks a new generator.
+- `p3-merkle-tree` `hiding_mmcs.rs`: `commit` draws every salt under the lock and releases it before
+  the tree is built (lines 143-150), with a regression test
+  (`commit_hashes_without_holding_the_rng_lock`); `Clone` forks (line 93).
+- `p3-matrix` `dense.rs`: `rand` (line 620) is sequential; `with_random_cols` (line 666) copies the
+  original rows in parallel and draws the random columns in a serial pass from the private
+  generator.
+- lrup's vendored `p3-batch-stark` (used in lrup's workspace) draws LogUp terminal masks from
+  `SysRng` directly (`terminal_mask.rs`), with no shared state.
+
+Every draw from a shared generator happens under its lock, so concurrent proofs consume disjoint
+parts of its stream and never reuse randomness; only the order of draws between proofs proven at
+the same time is unspecified, and nothing relies on it (a public preprocessing commitment is made
+by one `commit` during preparation, which never ran in the pool). With the pool, hiding proofs used
+one core: an outer wrap proved in about 147 s, against about 13 s without it.
+
+**Upstreamable.** Yes. The pool was added while upstream depended on Plonky3 0.8.0; upstream now
+pins 0.9.0-rc.2 (as at this fork's base), and the pool's TODO asked for this re-validation.
