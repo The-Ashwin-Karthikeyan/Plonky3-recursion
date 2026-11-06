@@ -515,9 +515,13 @@ impl GoldilocksD3W12ZkParams {
 /// so it cannot read OS entropy itself. There is deliberately no constructor that takes a seed:
 /// a predictable source makes every salt and mask reproducible and voids hiding.
 ///
-/// The circuit's preprocessed commitment is salted from the input MMCS's stream as well. Its
-/// contents are public (p3-fri pads it with zero rows, not random ones), and the verifier takes it
-/// from the trusted preparation, not by recomputing it.
+/// Under [`crate::BatchStarkProver::prepare_circuit`], the circuit's preprocessed commitment is
+/// salted from the input MMCS's stream as well, so every preparation gives a different verifying
+/// key. Its contents are public (p3-fri pads it with zero rows, not random ones), so to get a
+/// verifying key that anyone can recompute from the circuit, prepare with
+/// [`crate::BatchStarkProver::prepare_circuit_with_public_preprocessing`] and
+/// [`goldilocks_d3_w12_zk_public_preprocessing`]: the preprocessed commitment then uses a fixed,
+/// public salt stream, and every witness-dependent salt and mask still comes from `os_entropy`.
 ///
 /// # Table heights
 ///
@@ -543,6 +547,22 @@ where
     let fri_salts = fresh()?;
     let masks = fresh()?;
 
+    Ok(goldilocks_d3_w12_zk_from_streams(
+        params,
+        input_salts,
+        fri_salts,
+        masks,
+    ))
+}
+
+/// [`GoldilocksD3W12ZkConfig`] at `params` (already validated) over the given salt and mask
+/// streams.
+fn goldilocks_d3_w12_zk_from_streams(
+    params: GoldilocksD3W12ZkParams,
+    input_salts: GoldilocksD3W12ZkRng,
+    fri_salts: GoldilocksD3W12ZkRng,
+    masks: GoldilocksD3W12ZkRng,
+) -> GoldilocksD3W12ZkConfig {
     let perm = default_goldilocks_poseidon2_12();
     let input_mmcs = GoldilocksD3W12HidingMmcs::new(
         PaddingFreeSponge::new(perm.clone()),
@@ -573,9 +593,48 @@ where
         params.num_random_codewords,
         masks,
     );
-    Ok(StarkConfig::new(pcs, DuplexChallenger::new(perm))
+    StarkConfig::new(pcs, DuplexChallenger::new(perm))
         .with_lookup_proof_of_work_bits(0)
-        .with_ood_proof_of_work_bits(0))
+        .with_ood_proof_of_work_bits(0)
+}
+
+/// The public seeds of [`goldilocks_d3_w12_zk_public_preprocessing`]'s three streams (input-MMCS
+/// salts, FRI-MMCS salts, PCS masks). Only the first is ever drawn from: committing preprocessing
+/// salts its leaves and uses no FRI commitment or mask.
+const GOLDILOCKS_D3_W12_ZK_PUBLIC_PREPROCESSING_SEEDS: [[u8; 32]; 3] = [
+    *b"p3-circuit-prover/D3W12ZK/prep/0",
+    *b"p3-circuit-prover/D3W12ZK/prep/1",
+    *b"p3-circuit-prover/D3W12ZK/prep/2",
+];
+
+/// The configuration that commits a circuit's public preprocessing for proofs under
+/// [`goldilocks_d3_w12_zk`] with the same `params`, with salts from a fixed, public seed.
+///
+/// Pass it to [`crate::BatchStarkProver::prepare_circuit_with_public_preprocessing`] (with a
+/// prover built from [`goldilocks_d3_w12_zk`]) to make the preprocessed commitment, and so the
+/// verifying key, a deterministic function of the circuit and `params`: two preparations of one
+/// circuit, by the prover or by a verifier, get the same key.
+///
+/// This hides nothing it should not. The preprocessed matrices are the public circuit description;
+/// the hiding PCS commits them interleaved with zero rows and opens them without random codewords,
+/// and a verifier could recompute every opened row anyway. Merkle binding does not depend on the
+/// salts being secret. Every witness-dependent commitment, salt and mask is still drawn by the
+/// proving configuration from its OS-entropy streams; this configuration cannot be taken out of
+/// [`crate::PublicPreprocessingConfig`], so it never proves.
+///
+/// The salts come from [`GoldilocksD3W12ZkRng`] (`rand`'s `StdRng`), so the key also depends on
+/// that generator's algorithm in the pinned `rand` release.
+pub fn goldilocks_d3_w12_zk_public_preprocessing(
+    params: GoldilocksD3W12ZkParams,
+) -> Result<crate::PublicPreprocessingConfig<GoldilocksD3W12ZkConfig>, GoldilocksD3W12ZkError> {
+    use rand::SeedableRng;
+
+    params.validate()?;
+    let [input_salts, fri_salts, masks] =
+        GOLDILOCKS_D3_W12_ZK_PUBLIC_PREPROCESSING_SEEDS.map(GoldilocksD3W12ZkRng::from_seed);
+    Ok(crate::PublicPreprocessingConfig::new(
+        goldilocks_d3_w12_zk_from_streams(params, input_salts, fri_salts, masks),
+    ))
 }
 
 /// Trait bounds for STARK-compatible fields.
@@ -735,5 +794,24 @@ mod tests {
             .is_err()
         );
         assert_eq!(untouched.drawn, 0);
+    }
+
+    #[test]
+    fn goldilocks_d3_w12_zk_public_preprocessing_seeds_and_params() {
+        // Three distinct public seeds.
+        let seeds = GOLDILOCKS_D3_W12_ZK_PUBLIC_PREPROCESSING_SEEDS;
+        assert!(seeds[0] != seeds[1] && seeds[1] != seeds[2] && seeds[0] != seeds[2]);
+        goldilocks_d3_w12_zk_public_preprocessing(GoldilocksD3W12ZkParams::outer_wrap()).unwrap();
+        assert_eq!(
+            goldilocks_d3_w12_zk_public_preprocessing(GoldilocksD3W12ZkParams {
+                num_random_codewords: 2,
+                ..GoldilocksD3W12ZkParams::outer_wrap()
+            })
+            .unwrap_err(),
+            GoldilocksD3W12ZkError::InsufficientRandomCodewords {
+                required: 3,
+                got: 2,
+            }
+        );
     }
 }

@@ -794,6 +794,32 @@ where
     }
 }
 
+/// A configuration used only to commit a circuit's public preprocessing
+/// ([`BatchStarkProver::prepare_circuit_with_public_preprocessing`]).
+///
+/// It must be the prover's configuration up to its randomness: the same PCS, FRI and hiding
+/// parameters, so the committed preprocessing opens under the prover's configuration exactly as
+/// if the prover had committed it. Only the randomness differs: a hiding configuration built
+/// from a fixed, public seed makes the preprocessed commitment (the verifying key) reproducible.
+/// The wrapped configuration cannot be taken back out, so it cannot be used to prove.
+pub struct PublicPreprocessingConfig<SC> {
+    config: SC,
+}
+
+impl<SC> PublicPreprocessingConfig<SC> {
+    /// Wrap `config`, which commits public preprocessing and nothing else.
+    pub const fn new(config: SC) -> Self {
+        Self { config }
+    }
+}
+
+impl<SC> core::fmt::Debug for PublicPreprocessingConfig<SC> {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("PublicPreprocessingConfig")
+            .finish_non_exhaustive()
+    }
+}
+
 /// Verifier for one trusted circuit relation, independent of all proving data.
 pub struct CircuitVerifier<SC>
 where
@@ -3002,7 +3028,62 @@ where
     /// Finalize a circuit relation, commit its preprocessing exactly once, and return an opaque
     /// reusable proving owner. Custom NPO builders must explicitly implement trusted metadata.
     pub fn prepare_circuit<EF, const D: usize>(
+        self,
+        circuit: &p3_circuit::Circuit<EF>,
+        preprocessors: &[Box<dyn NpoPreprocessor<Val<SC>>>],
+        air_builders: &[Box<dyn NpoAirBuilder<SC, D>>],
+        constraint_profile: ConstraintProfile,
+    ) -> Result<PreparedCircuitProver<SC>, BatchStarkProverError>
+    where
+        EF: Field + ExtensionField<Val<SC>> + ExtractBinomialW<Val<SC>>,
+    {
+        self.prepare_circuit_committing_with::<EF, D>(
+            None,
+            circuit,
+            preprocessors,
+            air_builders,
+            constraint_profile,
+        )
+    }
+
+    /// [`Self::prepare_circuit`], with the circuit's preprocessing committed under
+    /// `preprocessing` instead of the prover's own configuration. Every proof is still produced
+    /// under the prover's configuration and its randomness.
+    ///
+    /// A hiding configuration salts every commitment, the preprocessed one included, from its own
+    /// randomness, so [`Self::prepare_circuit`] gives a different preprocessed commitment (and so
+    /// a different verifying key) on every preparation. The preprocessed data is the public
+    /// circuit description and is never masked, so a fixed, public salt stream loses nothing; with
+    /// one, the verifying key is a function of the circuit and can be recomputed by anyone. See
+    /// [`PublicPreprocessingConfig`].
+    pub fn prepare_circuit_with_public_preprocessing<EF, const D: usize>(
+        self,
+        preprocessing: &PublicPreprocessingConfig<SC>,
+        circuit: &p3_circuit::Circuit<EF>,
+        preprocessors: &[Box<dyn NpoPreprocessor<Val<SC>>>],
+        air_builders: &[Box<dyn NpoAirBuilder<SC, D>>],
+        constraint_profile: ConstraintProfile,
+    ) -> Result<PreparedCircuitProver<SC>, BatchStarkProverError>
+    where
+        EF: Field + ExtensionField<Val<SC>> + ExtractBinomialW<Val<SC>>,
+    {
+        if preprocessing.config.is_zk() != self.config.is_zk() {
+            return Err(BatchStarkProverError::RelationMismatch(
+                "the preprocessing configuration and the prover's differ in hiding".into(),
+            ));
+        }
+        self.prepare_circuit_committing_with::<EF, D>(
+            Some(&preprocessing.config),
+            circuit,
+            preprocessors,
+            air_builders,
+            constraint_profile,
+        )
+    }
+
+    fn prepare_circuit_committing_with<EF, const D: usize>(
         mut self,
+        preprocessing_config: Option<&SC>,
         circuit: &p3_circuit::Circuit<EF>,
         preprocessors: &[Box<dyn NpoPreprocessor<Val<SC>>>],
         air_builders: &[Box<dyn NpoAirBuilder<SC, D>>],
@@ -3047,9 +3128,12 @@ where
                 air.cache_preprocessed_trace();
             }
         }
-        let prover_data =
-            ProverData::from_airs_and_degrees(&self.config, &airs, relation.trace_degree_bits())
-                .map_err(|e| BatchStarkProverError::Prove(format!("{e:?}")))?;
+        let prover_data = ProverData::from_airs_and_degrees(
+            preprocessing_config.unwrap_or(&self.config),
+            &airs,
+            relation.trace_degree_bits(),
+        )
+        .map_err(|e| BatchStarkProverError::Prove(format!("{e:?}")))?;
         self.table_packing = relation.table_packing().clone();
 
         let mut non_primitive_airs = Vec::with_capacity(relation.non_primitives().len());

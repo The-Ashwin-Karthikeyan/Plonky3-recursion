@@ -42,11 +42,12 @@ use p3_circuit_prover::batch_stark_prover::poseidon2_air_builders_for_configs;
 use p3_circuit_prover::common::NpoAirBuilder;
 use p3_circuit_prover::config::{
     GOLDILOCKS_D3_W12_ZK_SALT_ELEMS, GoldilocksD3W12ZkConfig, GoldilocksD3W12ZkError,
-    GoldilocksD3W12ZkParams, goldilocks_d3_w12_zk,
+    GoldilocksD3W12ZkParams, goldilocks_d3_w12_zk, goldilocks_d3_w12_zk_public_preprocessing,
 };
 use p3_circuit_prover::{
     BatchStarkProof, BatchStarkProver, CircuitVerifier, ConstraintProfile, Poseidon2ProverD3,
-    PreparedCircuitProver, RecomposeAirBuilder, RecomposeProver, TablePacking,
+    PreparedCircuitProver, PublicPreprocessingConfig, RecomposeAirBuilder, RecomposeProver,
+    TablePacking,
 };
 use p3_field::{BasedVectorSpace, PrimeCharacteristicRing, PrimeField64};
 use p3_recursion::{BatchOnly, PcsRecursionBackend};
@@ -135,6 +136,16 @@ fn prepare_hiding(
     packing: TablePacking,
     circuit: &Circuit<EF>,
 ) -> Result<PreparedCircuitProver<ZkConfig>, p3_circuit_prover::BatchStarkProverError> {
+    prepare_hiding_with(config, None, packing, circuit)
+}
+
+/// [`prepare_hiding`], with the preprocessing committed under `preprocessing` when given.
+fn prepare_hiding_with(
+    config: ZkConfig,
+    preprocessing: Option<&PublicPreprocessingConfig<ZkConfig>>,
+    packing: TablePacking,
+    circuit: &Circuit<EF>,
+) -> Result<PreparedCircuitProver<ZkConfig>, p3_circuit_prover::BatchStarkProverError> {
     let shared = PERM.for_shared_challenger_table();
     let mut prover = BatchStarkProver::new(config).with_table_packing(packing);
     prover.register_table_prover(Box::new(Poseidon2ProverD3::new(
@@ -150,12 +161,21 @@ fn prepare_hiding(
         PcsRecursionBackend::<D3RecursionConfig, BatchOnly, D>::non_primitive_preprocessors(
             &backend(),
         );
-    prover.prepare_circuit::<EF, D>(
-        circuit,
-        &preprocessors,
-        &air_builders,
-        ConstraintProfile::Standard,
-    )
+    match preprocessing {
+        None => prover.prepare_circuit::<EF, D>(
+            circuit,
+            &preprocessors,
+            &air_builders,
+            ConstraintProfile::Standard,
+        ),
+        Some(preprocessing) => prover.prepare_circuit_with_public_preprocessing::<EF, D>(
+            preprocessing,
+            circuit,
+            &preprocessors,
+            &air_builders,
+            ConstraintProfile::Standard,
+        ),
+    }
 }
 
 /// A hiding layer proof with its verifier and timings.
@@ -494,6 +514,84 @@ fn two_proofs_share_no_commitment_salt_or_opened_value() {
             &walk.fri_salts,
         );
     }
+}
+
+/// With the preprocessing committed under the public-seed configuration
+/// (`goldilocks_d3_w12_zk_public_preprocessing`), two independent preparations of one circuit,
+/// each with its own OS-seeded proving config, get the same preprocessed commitment and relation,
+/// so the verifying key is recomputable: a proof from one verifies under the other's verifier. A
+/// preparation that salts the preprocessing from OS entropy gets another commitment. The two
+/// proofs still share no witness-dependent commitment, salt or opened value.
+#[test]
+fn public_preprocessing_gives_a_recomputable_verifying_key() {
+    let params = GoldilocksD3W12ZkParams::test();
+    let layer = layer2(D3FriParams::test_params(), D3FriParams::test_params());
+    let packing = params
+        .pad_table_packing(TablePacking::new(2, 4))
+        .expect("the hiding budget fits");
+    let prepare = |public: bool| {
+        let preprocessing = public.then(|| {
+            goldilocks_d3_w12_zk_public_preprocessing(params)
+                .expect("the public preprocessing config builds")
+        });
+        prepare_hiding_with(
+            zk_config(params),
+            preprocessing.as_ref(),
+            packing.clone(),
+            &layer.circuit,
+        )
+        .expect("the layer-2 circuit prepares")
+    };
+    let vk = |verifier: &CircuitVerifier<ZkConfig>| {
+        verifier
+            .common_data()
+            .preprocessed
+            .as_ref()
+            .map(|p| p.commitment.roots().iter().map(digest).collect::<Vec<_>>())
+            .expect("the circuit has preprocessed columns")
+    };
+
+    let first = prepare(true);
+    let second = prepare(true);
+    let salted = prepare(false);
+    assert_eq!(vk(&first.verifier()), vk(&second.verifier()));
+    assert_eq!(
+        first.relation().trace_degree_bits(),
+        second.relation().trace_degree_bits()
+    );
+    assert_ne!(
+        vk(&first.verifier()),
+        vk(&salted.verifier()),
+        "OS-entropy preprocessing salts give another commitment"
+    );
+
+    // Each proof verifies under the other preparation's verifier.
+    let proof_first = first.prove(&layer.traces).expect("proves");
+    let proof_second = second.prove(&layer.traces).expect("proves");
+    second
+        .verifier()
+        .verify(&proof_first, &[])
+        .expect("verifies under the independently prepared key");
+    first
+        .verifier()
+        .verify(&proof_second, &[])
+        .expect("verifies under the independently prepared key");
+    // Not under the OS-salted preparation's key.
+    assert!(salted.verifier().verify(&proof_first, &[]).is_err());
+
+    let (a, b) = (disclosed(&proof_first), disclosed(&proof_second));
+    assert_disjoint(
+        "commitment roots and Merkle digests",
+        &a.digests,
+        &b.digests,
+    );
+    assert_disjoint("salts", &a.salts, &b.salts);
+    assert_disjoint(
+        "out-of-domain, random-codeword, FRI and terminal values",
+        &a.ext_values,
+        &b.ext_values,
+    );
+    assert_disjoint("input query openings", &a.base_values, &b.base_values);
 }
 
 /// A table below the hiding budget is refused: by the config's packing check, and by the hiding

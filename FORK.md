@@ -545,3 +545,43 @@ up to 2^10 proofs per certificate, plus 2 bits of headroom. FRI stays in the uni
 regime (per-query bits `-log2((1 + rho) / 2)`), with the query PoW unchanged at 22 bits.
 
 **Upstreamable.** No; project-specific parameters.
+
+### WP13: deterministic preprocessing commitment for hiding circuits
+
+**What changed.**
+
+- `circuit-prover/src/batch_stark_prover.rs`:
+  `BatchStarkProver::prepare_circuit_with_public_preprocessing(preprocessing, circuit, ...)`,
+  `prepare_circuit` with the circuit's preprocessing committed under a caller-chosen configuration
+  of the same type instead of the prover's own. Proofs are still produced under the prover's
+  configuration and its randomness; the returned `CircuitVerifier` carries the commitment made by
+  `preprocessing`. `prepare_circuit` is unchanged (both share one private body). It refuses a
+  preprocessing configuration whose hiding flag differs from the prover's.
+- `PublicPreprocessingConfig<SC>`: the wrapper that `preprocessing` must be. Its configuration
+  cannot be taken back out, so a configuration built for preprocessing cannot be handed to a
+  `BatchStarkProver` and used to prove.
+- `circuit-prover/src/config.rs`: `goldilocks_d3_w12_zk_public_preprocessing(params)`, the
+  preprocessing configuration for `goldilocks_d3_w12_zk(params, _)`: the same PCS, MMCSs and
+  parameters, with its three generators seeded from fixed, public, domain-separated 32-byte seeds
+  (`GOLDILOCKS_D3_W12_ZK_PUBLIC_PREPROCESSING_SEEDS`). Only the input-MMCS stream is ever drawn
+  from (committing preprocessing salts its leaves; `HidingFriPcs::commit_preprocessing` adds zero
+  rows, not random ones, and opens without random codewords). Both constructors now build through
+  one private `goldilocks_d3_w12_zk_from_streams`. The `goldilocks_d3_w12_zk` documentation points
+  to the new option. Unit test `goldilocks_d3_w12_zk_public_preprocessing_seeds_and_params`.
+- `recursion/tests/goldilocks_d3_zk.rs`: `public_preprocessing_gives_a_recomputable_verifying_key`.
+  Two independent preparations of the layer-2 circuit, each with its own OS-seeded proving config
+  and the public preprocessing config, get the same preprocessed commitment and relation; each one's
+  proof verifies under the other's verifier and not under a preparation that salted its
+  preprocessing from OS entropy (which gets another commitment); the two proofs still share no
+  commitment root, Merkle digest, salt, opened value or query row.
+
+**Why.** A hiding configuration salts every commitment from its generators, the preprocessed one
+included, so each preparation of a hiding circuit had a different verifying key, and a verifier
+could not recompute the key from the circuit. The preprocessed matrices are the public circuit
+description and are never masked, so a fixed public salt stream for them loses nothing (Merkle
+binding does not depend on secret salts), while every witness-dependent salt and mask still comes
+from the proving configuration's OS-entropy streams. This is the split lrup's own hiding prover
+uses (`lrup-backend-p3` `zk_config.rs`, `make_zk_commit_config`). The key depends on the circuit,
+the parameters and `rand`'s `StdRng` algorithm in the pinned `rand` release.
+
+**Upstreamable.** Yes: generic and additive (the wrapper and method work for any configuration).
