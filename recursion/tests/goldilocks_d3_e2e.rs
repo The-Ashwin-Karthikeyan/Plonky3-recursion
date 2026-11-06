@@ -20,7 +20,7 @@
 //!
 //! The fast tests use `D3FriParams::test_params()`. The ignored
 //! `two_layers_at_lrup_parameters` runs the inner proof at lrup's exact parameters and both
-//! layers at a 128-bit recursion config, and prints each layer's table heights, times and peak
+//! layers at a 140-bit recursion config, and prints each layer's table heights, times and peak
 //! memory.
 
 #[path = "common/goldilocks_d3_config.rs"]
@@ -150,11 +150,11 @@ fn two_layers_prove_and_verify() {
     assert_eq!(layers.layer2.proof.ext_degree, D);
 }
 
-/// Layers 1 and 2 over an inner proof at lrup's exact parameters, each layer at a 128-bit
-/// recursion config (rate 1/4, 157 queries, 22-bit query PoW). Run explicitly, on one thread,
+/// Layers 1 and 2 over an inner proof at lrup's exact parameters, each layer at a 140-bit
+/// recursion config (rate 1/4, 175 queries, 22-bit query PoW). Run explicitly, on one thread,
 /// to record the per-layer table heights, times and peak memory.
 #[test]
-#[ignore = "slow: lrup's inner parameters and 128-bit recursion layers; run with --ignored"]
+#[ignore = "slow: lrup's inner parameters and 140-bit recursion layers; run with --ignored"]
 fn two_layers_at_lrup_parameters() {
     let inner = D3FriParams::lrup_inner_params();
     let config = D3RecursionConfig::new(inner);
@@ -170,7 +170,7 @@ fn two_layers_at_lrup_parameters() {
             fri.commit_proof_of_work_bits,
             fri.batch_proof_of_work_bits,
         ),
-        (1, 256, 22, 3, 0, 0, 0)
+        (1, 285, 22, 3, 0, 0, 0)
     );
     two_layers(inner, D3FriParams::recursion_layer_params());
 }

@@ -369,18 +369,18 @@ pub struct GoldilocksD3W12ZkParams {
 }
 
 impl GoldilocksD3W12ZkParams {
-    /// The proposed outer-wrap parameters: rate 1/8, 128 queries and 22 bits of query grinding,
-    /// folding arity up to 8, three random codewords.
+    /// The outer-wrap parameters: rate 1/8, 143 queries and 22 bits of query grinding, folding
+    /// arity up to 8, three random codewords.
     ///
     /// Hiding does not change the FRI rate: the hiding PCS doubles every committed polynomial's
     /// degree bound (`2N` for a trace of height `N`) and then applies the blowup to that, so the
     /// committed codewords have rate exactly `2^-log_blowup`. Under unique decoding each query
-    /// gives `-log2((1 + 1/8) / 2) = 0.830` bits: `128 * 0.830 + 22 = 128.2` proven bits. The
-    /// hiding budget is `2 * (128 + 3 * 2) = 268` values, so every table needs at least 512 rows.
+    /// gives `-log2((1 + 1/8) / 2) = 0.830` bits: `143 * 0.830 + 22 = 140.7` proven bits. The
+    /// hiding budget is `2 * (143 + 3 * 2) = 298` values, so every table needs at least 512 rows.
     pub const fn outer_wrap() -> Self {
         Self {
             log_blowup: 3,
-            num_queries: 128,
+            num_queries: 143,
             query_pow_bits: 22,
             max_log_arity: 3,
             num_random_codewords: GOLDILOCKS_D3_W12_ZK_EXT_DEGREE,
@@ -634,7 +634,7 @@ mod tests {
     fn goldilocks_d3_w12_zk_params_and_budget() {
         let outer = GoldilocksD3W12ZkParams::outer_wrap();
         outer.validate().unwrap();
-        assert_eq!(outer.hiding_budget(), Some(268));
+        assert_eq!(outer.hiding_budget(), Some(298));
         assert_eq!(outer.min_trace_height(), Some(512));
         let test = GoldilocksD3W12ZkParams::test();
         assert_eq!(test.hiding_budget(), Some(28));

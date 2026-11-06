@@ -20,7 +20,7 @@
 //! - a changed opened value, random-codeword opening or query opening is rejected.
 //!
 //! The ignored `hiding_layer2_at_outer_parameters` measures the hiding layer-2 proof at the
-//! proposed outer-wrap parameters against the non-hiding one.
+//! outer-wrap parameters against the non-hiding one.
 
 #[path = "common/goldilocks_d3_config.rs"]
 mod goldilocks_d3_config;
@@ -681,8 +681,8 @@ fn tampered_opened_value_is_rejected() {
     }
 }
 
-/// The proposed outer-wrap parameters reach 128 proven bits under unique decoding and set the
-/// hiding budget the tables must meet.
+/// The outer-wrap parameters reach 140 proven bits under unique decoding and set the hiding
+/// budget the tables must meet.
 #[test]
 fn outer_wrap_parameters() {
     let params = GoldilocksD3W12ZkParams::outer_wrap();
@@ -691,16 +691,16 @@ fn outer_wrap_parameters() {
     let bits_per_query = -((1.0 + rate) / 2.0).log2();
     let proven = (params.num_queries as f64).mul_add(bits_per_query, params.query_pow_bits as f64);
     eprintln!("outer wrap {params:?}: {bits_per_query:.4} bits/query, {proven:.2} proven bits");
-    assert!(proven >= 128.0, "{proven}");
-    assert_eq!(params.hiding_budget(), Some(2 * (128 + 3 * 2)));
+    assert!(proven >= 140.0, "{proven}");
+    assert_eq!(params.hiding_budget(), Some(2 * (143 + 3 * 2)));
     assert_eq!(params.min_trace_height(), Some(512));
 }
 
-/// The hiding layer-2 proof at the proposed outer-wrap parameters, against the non-hiding layer-2
-/// proof at the 128-bit recursion-layer parameters and the hiding one at those same parameters.
+/// The hiding layer-2 proof at the outer-wrap parameters, against the non-hiding layer-2 proof at
+/// the 140-bit recursion-layer parameters and the hiding one at those same parameters.
 /// The inner proof is at lrup's parameters and layer 1 at the recursion-layer parameters.
 #[test]
-#[ignore = "slow: lrup's inner parameters and 128-bit layers; run with --ignored"]
+#[ignore = "slow: lrup's inner parameters and 140-bit layers; run with --ignored"]
 fn hiding_layer2_at_outer_parameters() {
     let recursion = D3FriParams::recursion_layer_params();
     let layer = layer2(D3FriParams::lrup_inner_params(), recursion);

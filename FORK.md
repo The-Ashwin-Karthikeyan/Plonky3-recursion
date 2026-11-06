@@ -296,9 +296,9 @@ verification at `D = 3`. The built-in suite registry and its D3 suite are WP6.
   `TruncatedPermutation<_, 2, 6, 12>`, cap height 0, `DuplexChallenger<_, _, 12, 6>`,
   `log_final_poly_len` 0, no commit or batch PoW, no lookup or out-of-domain grinding.
   - `D3FriParams::lrup_inner_params()`: lrup's inner config (log blowup 1, 256 queries, 22-bit
-    query PoW, max log arity 3).
+    query PoW, max log arity 3; 285 queries since WP12).
   - `D3FriParams::recursion_layer_params()`: a 128-bit recursion-layer config (log blowup 2, 157
-    queries, 22-bit query PoW, max log arity 3).
+    queries, 22-bit query PoW, max log arity 3; 140 bits and 175 queries since WP12).
   - `D3FriParams::test_params()`: cheap parameters in the same shape (8 queries, 4-bit PoW).
   - Shared helpers: the D3 backend, `prove_layer_with_stats` (prove a verifier circuit at
     `D = 3` and verify it natively, with timings) and `layer_input` (the next-layer input of a
@@ -445,7 +445,8 @@ known-answer comments would be dropped.
     and its `rand` has no OS-entropy feature). There is no constructor that takes a seed.
   - `GoldilocksD3W12ZkParams` (log blowup, queries, query PoW bits, maximum log arity, random
     codewords) with `outer_wrap()` (rate 1/8, 128 queries, 22-bit query PoW, arity up to 8,
-    3 random codewords: 128.2 proven bits under unique decoding) and `test()`. `validate()`
+    3 random codewords: 128.2 proven bits under unique decoding; 143 queries and 140.7 bits
+    since WP12) and `test()`. `validate()`
     refuses fewer random codewords than the extension degree. `hiding_budget()` is p3-fri's
     per-matrix budget at two opening points, `2 * (queries + 3 * 2)`, and `min_trace_height()` the
     power of two above it (512 rows at `outer_wrap()`). `pad_table_packing` raises a
@@ -520,3 +521,27 @@ Nothing else changes: the targets are still the exact AIR-public targets the tru
 consumed, and the child's preprocessing commitment is still pinned the same way.
 
 **Upstreamable.** Yes; generic and additive.
+
+### WP12: lrup parameters raised to 140 bits
+
+**What changed.** Parameters, tests and documentation only; no library logic.
+
+- `circuit-prover/src/config.rs`: `GoldilocksD3W12ZkParams::outer_wrap()` is rate 1/8, **143**
+  queries (was 128), 22-bit query PoW, arity up to 8, 3 random codewords:
+  `143 * -log2((1 + 1/8) / 2) + 22 = 140.70` proven bits under unique decoding. The hiding budget
+  becomes `2 * (143 + 3 * 2) = 298` values (was 268), so the minimum table height stays 512 rows.
+  The unit test `goldilocks_d3_w12_zk_params_and_budget` asserts the new budget.
+- `recursion/tests/common/goldilocks_d3_config.rs`: `D3FriParams::lrup_inner_params()` follows
+  lrup's inner config, log blowup 1 with **285** queries (was 256) and 22-bit query PoW (140.29
+  bits); `recursion_layer_params()` is log blowup 2 with **175** queries (was 157) and 22-bit
+  query PoW (140.66 bits).
+- `recursion/tests/goldilocks_d3_e2e.rs` and `recursion/tests/goldilocks_d3_zk.rs`: the
+  assertions and documentation follow (lrup's parameters `(1, 285, 22, 3, 0, 0, 0)`; the outer
+  wrap reaches at least 140 bits with the new budget).
+
+**Why.** Every proof in lrup's recursive pipeline (inner shard proofs, recursion layers, outer
+hiding wrap) now targets 140 proven bits: 128 bits plus `log2(N_max) = 10` for a union bound over
+up to 2^10 proofs per certificate, plus 2 bits of headroom. FRI stays in the unique-decoding
+regime (per-query bits `-log2((1 + rho) / 2)`), with the query PoW unchanged at 22 bits.
+
+**Upstreamable.** No; project-specific parameters.

@@ -81,23 +81,23 @@ pub struct D3FriParams {
 
 impl D3FriParams {
     /// lrup's inner config exactly (`lrup-backend-p3/src/config.rs`, `make_config`): rate 1/2,
-    /// 256 queries and 22 bits of query grinding (~128 proven bits under unique decoding), folding
-    /// arity up to 8.
+    /// 285 queries and 22 bits of query grinding (140.29 proven bits under unique decoding,
+    /// `285 * -log2(3/4) + 22`), folding arity up to 8.
     pub const fn lrup_inner_params() -> Self {
         Self {
             log_blowup: 1,
-            num_queries: 256,
+            num_queries: 285,
             query_pow_bits: 22,
             max_log_arity: 3,
         }
     }
 
-    /// A recursion-layer config at the same 128-bit target (plan "Soundness budget"): rate 1/4,
-    /// 157 queries and 22 bits of query grinding.
+    /// A recursion-layer config at the same 140-bit target (plan "Soundness budget"): rate 1/4,
+    /// 175 queries and 22 bits of query grinding (140.66 proven bits, `175 * -log2(5/8) + 22`).
     pub const fn recursion_layer_params() -> Self {
         Self {
             log_blowup: 2,
-            num_queries: 157,
+            num_queries: 175,
             query_pow_bits: 22,
             max_log_arity: 3,
         }
